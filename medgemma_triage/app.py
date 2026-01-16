@@ -100,6 +100,10 @@ for msg in st.session_state.display_messages:
             _render_assistant_message(msg["parsed"])
 
 
+# Pre-compile regex patterns for efficiency
+SEARCH_PATTERN = re.compile(r'\[SEARCH:\s*(.*?)\]')
+TOOL_PATTERN = re.compile(r'\[TOOL:\s*(\w+),\s*(\{.*?\})\]', re.DOTALL)
+
 # 5. Chat Input & ReAct Loop
 if user_input := st.chat_input("Describe patient symptoms..."):
     st.session_state.messages.append({"role": "user", "content": user_input})
@@ -124,8 +128,8 @@ if user_input := st.chat_input("Describe patient symptoms..."):
                 raw_content = response.choices[0].message.content
                 
                 # Check for [SEARCH: ...] or [TOOL: tool_name, args]
-                search_match = re.search(r'\[SEARCH:\s*(.*?)\]', raw_content)
-                tool_match = re.search(r'\[TOOL:\s*(\w+),\s*(\{.*?\})\]', raw_content, re.DOTALL)
+                search_match = SEARCH_PATTERN.search(raw_content)
+                tool_match = TOOL_PATTERN.search(raw_content)
                 
                 if search_match:
                     query = search_match.group(1).strip()
