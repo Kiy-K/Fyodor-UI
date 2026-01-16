@@ -1,6 +1,13 @@
 import json
 import re
 
+# Pre-compile regex patterns for efficiency
+THOUGHT_PATTERN = re.compile(
+    r'(<unused94>thought|<think>)(.*?)(<unused95>|</think>)',
+    re.DOTALL
+)
+JSON_PATTERN = re.compile(r'\{.*\}', re.DOTALL)
+
 
 def parse_medgemma_response(raw_text: str) -> dict:
     """
@@ -9,25 +16,16 @@ def parse_medgemma_response(raw_text: str) -> dict:
     Returns a dict with thought, is_json flag, and content.
     """
     # 1. Extract Thought (support both <think> and <unused94>)
-    thought_match = re.search(
-        r'(<unused94>thought|<think>)(.*?)(<unused95>|</think>)',
-        raw_text,
-        re.DOTALL
-    )
+    thought_match = THOUGHT_PATTERN.search(raw_text)
     thought = thought_match.group(2).strip() if thought_match else ""
     
     # 2. Extract JSON (Robust fallback)
     # Remove thought block from text first
-    clean_text = re.sub(
-        r'(<unused94>thought|<think>).*?(<unused95>|</think>)',
-        '',
-        raw_text,
-        flags=re.DOTALL
-    ).strip()
+    clean_text = THOUGHT_PATTERN.sub('', raw_text).strip()
     
     json_data = None
     try:
-        json_match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+        json_match = JSON_PATTERN.search(clean_text)
         if json_match:
             json_data = json.loads(json_match.group(0))
     except (json.JSONDecodeError, Exception):
