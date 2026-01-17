@@ -3,7 +3,8 @@ import json
 import httpx
 import base64
 import asyncio
-from typing import Generator, Tuple, Dict, Any, List
+import re
+from typing import Generator, Tuple, Dict, Any, List, Optional
 from openai import OpenAI
 import streamlit as st
 
@@ -23,9 +24,12 @@ if not MCP_SERVER_URL.endswith("/call_tool"):
 else:
     MCP_TOOL_ENDPOINT = MCP_SERVER_URL
 
+# --- Regex Patterns ---
+THINK_PATTERN = re.compile(r'<think>(.*?)</think>', re.DOTALL)
+LEGACY_THOUGHT_PATTERN = re.compile(r'<unused94>thought\n(.*?)\n<unused95>', re.DOTALL)
+JSON_BLOCK_PATTERN = re.compile(r'```json\s*(\{.*?\})\s*```', re.DOTALL)
+
 # --- Tool Definitions ---
-# Note: Media tools have EMPTY parameters in the schema exposed to the LLM.
-# The actual heavy data is injected by the frontend.
 TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -102,7 +106,7 @@ TOOLS_SCHEMA = [
 
 # --- Helper Functions ---
 
-def encode_to_base64(file_obj) -> str:
+def encode_to_base64(file_obj) -> Optional[str]:
     """Encodes a file-like object to Base64 string."""
     if file_obj is None:
         return None
@@ -159,6 +163,49 @@ def call_fastmcp_tool(tool_name: str, args: dict) -> str:
         return f"Error calling {tool_name}: {e.response.text}"
     except Exception as e:
         return f"Connection Error ({tool_name}): {str(e)}"
+
+def parse_medgemma_response(raw_response: str) -> Dict[str, Any]:
+    """
+    Parses the raw response from MedGemma which might include:
+    - <think>...</think> or <unused94>thought...<unused95> tags
+    - Markdown report
+    - JSON blocks inside markdown code fences
+    """
+    result = {
+        "thought": None,
+        "markdown_report": raw_response,
+        "json_data": None
+    }
+
+    # 1. Extract Thought
+    # Try <think> pattern
+    match = THINK_PATTERN.search(raw_response)
+    if match:
+        result["thought"] = match.group(1).strip()
+        result["markdown_report"] = THINK_PATTERN.sub('', raw_response).strip()
+
+    # Try <unused94> pattern (legacy/alternative)
+    if not result["thought"]:
+        match = LEGACY_THOUGHT_PATTERN.search(raw_response)
+        if match:
+            result["thought"] = match.group(1).strip()
+            # Note: The test case implies the report continues after the thought block
+            # For simplicity, we remove the thought block from the report
+            result["markdown_report"] = LEGACY_THOUGHT_PATTERN.sub('', raw_response).strip()
+
+    # 2. Extract JSON
+    match = JSON_BLOCK_PATTERN.search(result["markdown_report"])
+    if match:
+        try:
+            json_str = match.group(1)
+            result["json_data"] = json.loads(json_str)
+            # Remove the JSON block from the report?
+            # The test says: self.assertNotIn("```json", parsed['markdown_report'])
+            result["markdown_report"] = JSON_BLOCK_PATTERN.sub('', result["markdown_report"]).strip()
+        except json.JSONDecodeError:
+            pass
+
+    return result
 
 # --- The Agent Loop ---
 

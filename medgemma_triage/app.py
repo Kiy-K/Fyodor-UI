@@ -1,8 +1,12 @@
 import streamlit as st
 import json
 import asyncio
+import re
 from upstash_redis import Redis
 import utils
+
+# Pre-compiled pattern for legacy tool parsing
+TOOL_PATTERN = re.compile(r"\[TOOL: (\w+), ({.*?})\]")
 
 # 1. Setup & Config
 st.set_page_config(
@@ -138,8 +142,19 @@ with col_left:
 
             try:
                 for event_type, content in generator:
+                    # Generic tool call legacy support
+                    tool_match = TOOL_PATTERN.search(str(content))
+
                     if event_type == "status":
                         status_box.write(f"ℹ️ {content}")
+                    elif tool_match:
+                        # Generic tool call: [TOOL: tool_name, {args}]
+                        tool_name = tool_match.group(1)
+                        try:
+                            # json is imported at top of file
+                            tool_args = json.loads(tool_match.group(2))
+                        except:
+                            pass
                     elif event_type == "tool":
                         status_box.write(f"🛠️ {content}")
                     elif event_type == "tool_result":
