@@ -9,7 +9,11 @@ from openai import AsyncOpenAI
 import streamlit as st
 
 # Import from the new tools module
-from medgemma_triage.tools import TOOLS_SCHEMA, call_tool_async
+try:
+    from medgemma_triage.tools import TOOLS_SCHEMA, call_tool_async
+except ImportError:
+    # If running as a script or without package context (e.g. streamlit)
+    from tools import TOOLS_SCHEMA, call_tool_async
 
 # --- Configuration ---
 def get_config(key, default=None):
