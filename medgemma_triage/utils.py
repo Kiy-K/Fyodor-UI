@@ -62,6 +62,13 @@ def call_mcp_tool(tool_name: str, args: dict) -> str:
     """
     return asyncio.run(call_mcp_tool_async(tool_name, args))
 
+def run_chat(messages: list) -> str:
+    """
+    Wrapper for SGLang Chat Proxy tool.
+    Expects a list of dicts: [{"role": "user", "content": "..."}]
+    """
+    return call_mcp_tool("chat_with_consultant", {"messages": messages})
+
 async def gather_analysis_inputs(audio_file, image_file):
     """
     Orchestrates the parallel execution of:
