@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import utils
 import tools
 import prompts
+import ui
 
 # 1. Configuration & Setup
 load_dotenv()
@@ -19,34 +20,7 @@ st.set_page_config(
 )
 
 # Custom CSS for Professional Medical Look
-st.markdown("""
-    <style>
-    .reportview-container {
-        background: #F5F7F8;
-    }
-    .main-header {
-        font-family: 'Helvetica Neue', sans-serif;
-        color: #37474F;
-    }
-    .stApp {
-        background-color: #F5F7F8;
-    }
-    .triage-card {
-        padding: 20px;
-        border-radius: 10px;
-        color: white;
-        margin-bottom: 20px;
-    }
-    .emergency { background-color: #e74c3c; }
-    .urgent { background-color: #e67e22; }
-    .stable { background-color: #27ae60; }
-
-    div.stButton > button:first-child {
-        background-color: #00796B;
-        color: white;
-    }
-    </style>
-""", unsafe_allow_html=True)
+ui.setup_styles()
 
 # 2. Sidebar & State
 with st.sidebar:
@@ -76,6 +50,14 @@ with st.sidebar:
         st.success(f"MCP: {mcp_url}")
     else:
         st.warning("MCP: Not Configured")
+
+    st.markdown("---")
+    st.subheader("Triage Engine")
+    engine_choice = st.radio(
+        "Select Model",
+        ["Expert (Modal 27B)", "Fast (Groq 70B)"],
+        index=0
+    )
 
     st.markdown("---")
     st.subheader("Model Settings")
@@ -124,106 +106,6 @@ for msg in st.session_state.messages:
             else:
                 st.write(msg["content"])
 
-# 4. Helper Function: Run Triage Logic
-def run_triage_engine(user_text, image_obj=None):
-    """Executes the full ReAct loop for a given text and optional image."""
-
-    # 1. Prepare Message Content (Multimodal)
-    message_content = user_text
-
-    if image_obj:
-        img_bytes = image_obj.read()
-        base64_img = base64.b64encode(img_bytes).decode('utf-8')
-        message_content = [
-            {"type": "text", "text": user_text},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-        ]
-        st.toast("Sending multimodal data to MedGemma 27B...", icon="🚀")
-
-    # Add User Message to History
-    st.session_state.messages.append({"role": "user", "content": message_content})
-    with st.chat_message("user"):
-        st.markdown(user_text)
-        if image_obj:
-            image_obj.seek(0)
-            st.image(image_obj)
-
-    # Prepare Context for Model
-    context_messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}] + st.session_state.messages
-
-    with st.chat_message("assistant"):
-        placeholder = st.empty()
-        status_container = st.status("Initializing Medical Brain... (May be slow on cold start)", expanded=True)
-
-        try:
-            # --- ReAct LOOP ---
-            max_turns = 5
-            final_response_text = ""
-
-            for turn in range(max_turns):
-                # Call Model
-                try:
-                    status_container.write(f"AI Brain: Modal MedGemma 27B (Turn {turn+1})...")
-                    response_text = call_model(context_messages)
-                except Exception as e:
-                    status_container.update(label="System Warning", state="error")
-                    st.error(str(e))
-                    st.stop()
-
-                # Check for Search Command
-                search_query = utils.extract_search_command(response_text)
-
-                if search_query:
-                    status_container.markdown(f"**Tool Call:** `[SEARCH: {search_query}]`")
-                    tool_result = tools.search_pubmed(search_query)
-                    status_container.write("Tool result received.")
-                    context_messages.append({"role": "assistant", "content": response_text})
-                    context_messages.append({"role": "user", "content": f"TOOL_RESULT for '{search_query}':\n{tool_result}"})
-
-                else:
-                    final_response_text = response_text
-                    status_container.update(label="Diagnosis Complete", state="complete", expanded=False)
-                    break
-
-            # --- DISPLAY RESULTS ---
-            parsed = utils.parse_medgemma_response(final_response_text)
-
-            if parsed["thought"]:
-                with st.expander("🧠 Clinical Reasoning Process"):
-                    st.markdown(parsed["thought"])
-
-            if parsed["is_json"] and isinstance(parsed["data"], dict):
-                data = parsed["data"]
-                level = data.get("triage_level", "UNKNOWN").upper()
-                rationale = data.get("clinical_rationale", "No rationale provided.")
-                actions = data.get("recommended_actions", [])
-
-                color_class = "stable"
-                if level == "EMERGENCY":
-                    color_class = "emergency"
-                elif level == "URGENT":
-                    color_class = "urgent"
-
-                st.markdown(f"""
-                <div class="triage-card {color_class}">
-                    <h2>{level}</h2>
-                    <p><strong>Rationale:</strong> {rationale}</p>
-                </div>
-                """, unsafe_allow_html=True)
-
-                if actions:
-                    st.markdown("### 📋 Recommended Actions")
-                    for action in actions:
-                        st.markdown(f"- {action}")
-            else:
-                st.warning("Raw Output (Could not parse JSON):")
-                st.markdown(parsed["data"])
-
-            st.session_state.messages.append({"role": "assistant", "content": final_response_text})
-
-        except Exception as e:
-            st.error(f"An unexpected error occurred: {e}")
-
 def call_model(messages):
     """Calls the remote model via OpenAI client."""
     client = OpenAI(
@@ -243,6 +125,98 @@ def call_model(messages):
         if "503" in error_msg or "timeout" in error_msg.lower() or "connection error" in error_msg.lower():
             raise Exception("System is warming up (Cold Start). Please wait 30-60 seconds and try again.")
         raise e
+
+# 4. Helper Function: Run Triage Logic
+def run_triage_engine(user_text, image_obj=None):
+    """Executes the full ReAct loop for a given text and optional image."""
+
+    # 1. Prepare Message Content (Multimodal)
+    message_content = user_text
+
+    if image_obj:
+        img_bytes = image_obj.read()
+        base64_img = base64.b64encode(img_bytes).decode('utf-8')
+        message_content = [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+        ]
+        st.toast("Sending multimodal data...", icon="🚀")
+
+    # Add User Message to History
+    st.session_state.messages.append({"role": "user", "content": message_content})
+    with st.chat_message("user"):
+        st.markdown(user_text)
+        if image_obj:
+            image_obj.seek(0)
+            st.image(image_obj)
+
+    # Prepare Context for Model
+    context_messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}] + st.session_state.messages
+
+    # Determine Engine
+    use_fast_engine = "Fast" in engine_choice
+    source_type = "fast" if use_fast_engine else "expert"
+    engine_name = "Groq Llama-3.3-70B" if use_fast_engine else "Modal MedGemma 27B"
+
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        status_container = st.status(f"Initializing {engine_name}...", expanded=True)
+
+        try:
+            # --- ReAct LOOP ---
+            # Note: Fast engine might not follow strict ReAct loop with tools as robustly,
+            # but we'll try to keep the loop structure for search calls if supported.
+            max_turns = 5
+            final_response_text = ""
+
+            for turn in range(max_turns):
+                # Call Model
+                try:
+                    status_container.write(f"AI Brain: {engine_name} (Turn {turn+1})...")
+                    if use_fast_engine:
+                        response_text = tools.call_fast_triage(context_messages)
+                    else:
+                        response_text = call_model(context_messages)
+                except Exception as e:
+                    status_container.update(label="System Warning", state="error")
+                    st.error(str(e))
+                    # Stop execution if model call fails
+                    return
+
+                # Check for Search Command
+                search_query = utils.extract_search_command(response_text)
+
+                if search_query:
+                    status_container.markdown(f"**Tool Call:** `[SEARCH: {search_query}]`")
+                    tool_result = tools.search_pubmed(search_query)
+                    status_container.write("Tool result received.")
+                    context_messages.append({"role": "assistant", "content": response_text})
+                    context_messages.append({"role": "user", "content": f"TOOL_RESULT for '{search_query}':\n{tool_result}"})
+                else:
+                    final_response_text = response_text
+                    status_container.update(label="Diagnosis Complete", state="complete", expanded=False)
+                    break
+
+            # --- DISPLAY RESULTS ---
+            parsed = utils.parse_medgemma_response(final_response_text, source=source_type)
+
+            # Use UI helper to render
+            ui.render_clean_response(parsed)
+
+            # If parsing failed completely (no content, no thought, no data) but we have text, show raw
+            if not parsed["content"] and not parsed["thought"] and not parsed["is_json"]:
+                 # This happens if everything was stripped or empty, but let's check final_response_text
+                 if final_response_text:
+                     # This shouldn't happen with our parser unless it's weird.
+                     # But just in case, show raw.
+                     st.warning("Raw Output:")
+                     st.markdown(final_response_text)
+
+            st.session_state.messages.append({"role": "assistant", "content": final_response_text})
+
+        except Exception as e:
+            st.error(f"An unexpected error occurred: {e}")
+
 
 # 5. Live Audio & Legacy Upload Handling
 st.markdown("---")
