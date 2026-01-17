@@ -1,36 +1,45 @@
 import streamlit as st
 import prompts
-from mcp_client import query_jules_mcp
+from jules_brain import ask_fastmcp
 
-# Setup
-st.set_page_config(
-    page_title=prompts.APP_TITLE,
-    page_icon=prompts.APP_ICON,
-)
+st.set_page_config(page_title=prompts.APP_TITLE, page_icon=prompts.APP_ICON)
 
 st.title(f"{prompts.APP_ICON} {prompts.APP_TITLE}")
-st.markdown(prompts.DISCLAIMER)
 
-# Input
-user_query = st.text_input("Describe symptoms or ask a medical question:", placeholder="e.g. 45yo male with chest pain...")
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# Button
-if st.button("Ask Jules"):
-    if not user_query.strip():
-        st.warning("Please enter a query.")
-    else:
-        status = st.status(prompts.CONNECTING_STATUS)
-        try:
-            # Call backend
-            response = query_jules_mcp(user_query)
+# Display chat messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-            # Update Status
-            status.update(label="Complete", state="complete", expanded=False)
+# Chat input
+if prompt := st.chat_input("How can I help you?"):
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
 
-            # Display Result
-            st.success("Response Received")
-            st.markdown(response)
+    # Get response
+    with st.chat_message("assistant"):
+        with st.spinner(prompts.CONNECTING_MSG):
+            response_obj = ask_fastmcp(prompt)
 
-        except Exception as e:
-            status.update(label="Error", state="error")
-            st.error(f"Failed to connect to backend: {str(e)}")
+        # Determine how to display response based on its type
+        # The return type of the custom client.responses.create is unknown,
+        # so we try to extract content or default to string representation.
+        content = str(response_obj)
+
+        # Attempt to make it cleaner if it's a simple object with a 'content' or 'output' attribute
+        # (This is speculative based on common patterns, but fallback is safe)
+        if hasattr(response_obj, 'output'):
+            content = response_obj.output
+        elif hasattr(response_obj, 'content'):
+            content = response_obj.content
+        elif isinstance(response_obj, dict) and 'output' in response_obj:
+            content = response_obj['output']
+
+        st.markdown(content)
+        st.session_state.messages.append({"role": "assistant", "content": content})
