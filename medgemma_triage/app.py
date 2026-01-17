@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import time
+import base64
 from openai import OpenAI
 from dotenv import load_dotenv
 import utils
@@ -55,12 +56,19 @@ with st.sidebar:
 
     st.subheader("System Status")
 
-    # Check Modal Config
+    # Check Modal Config (Brain)
     modal_url = os.getenv("MODAL_API_URL")
     if modal_url:
-        st.success(f"Backend: Connected (Modal)")
+        st.success(f"Brain: Connected (Modal)")
     else:
-        st.error("Backend: Missing Configuration")
+        st.error("Brain: Missing Configuration")
+
+    # Check Modal ASR Config (Ear)
+    modal_asr_url = os.getenv("MODAL_ASR_URL")
+    if modal_asr_url:
+        st.success(f"Ear: Connected (Modal)")
+    else:
+        st.error("Ear: Missing Configuration")
 
     # Check MCP Config
     mcp_url = os.getenv("MCP_SERVER_URL")
@@ -82,6 +90,10 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
+    with st.sidebar.expander("📤 Media Upload"):
+        uploaded_image = st.file_uploader("Upload Medical Image (X-ray, MRI, etc.)", type=['jpg', 'jpeg', 'png'])
+        uploaded_audio = st.file_uploader("Upload Medical Recording (Patient voice, doctor notes)", type=['wav', 'mp3', 'm4a'])
+
 # Initialize Chat History
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -96,6 +108,12 @@ for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             if isinstance(msg["content"], str):
                 st.markdown(msg["content"])
+            elif isinstance(msg["content"], list):
+                for item in msg["content"]:
+                    if item["type"] == "text":
+                        st.markdown(item["text"])
+                    elif item["type"] == "image_url":
+                        st.image(item["image_url"]["url"])
             else:
                 # Handle structured display for past messages if needed
                 st.write(msg["content"])
@@ -110,9 +128,10 @@ def call_model(messages):
 
     try:
         response = client.chat.completions.create(
-            model="medgemma", # Model name usually ignored by some serve backends, but required
+            model="google/medgemma-27b-it",
             messages=messages,
-            temperature=temperature
+            temperature=temperature,
+            max_tokens=2048
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -125,17 +144,41 @@ def call_model(messages):
 user_input = st.chat_input("Describe patient symptoms (e.g., '45M with chest pain')...")
 
 if user_input:
+    # 1. Handle Audio
+    if uploaded_audio:
+        with st.status("Initializing Medical Engines (Ear & Brain)... This may take a minute on first run.") as status:
+            status.write("AI Ear: Modal MedASR")
+            audio_bytes = uploaded_audio.read()
+            transcription = tools.transcribe_audio(audio_bytes)
+            user_input += f"\n\n[TRANSCRIPTION: {transcription}]"
+            st.write("Transcription added.")
+
+    # 2. Prepare Message Content (Multimodal)
+    message_content = user_input
+
+    if uploaded_image:
+        img_bytes = uploaded_image.read()
+        base64_img = base64.b64encode(img_bytes).decode('utf-8')
+        message_content = [
+            {"type": "text", "text": user_input},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+        ]
+        st.toast("Sending multimodal data to MedGemma 27B...", icon="🚀")
+
     # Add User Message
-    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.messages.append({"role": "user", "content": message_content})
     with st.chat_message("user"):
         st.markdown(user_input)
+        if uploaded_image:
+            uploaded_image.seek(0)
+            st.image(uploaded_image)
 
     # Prepare Context
     context_messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}] + st.session_state.messages
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
-        status_container = st.status("Thinking...", expanded=True)
+        status_container = st.status("Initializing Medical Engines (Ear & Brain)... This may take a minute on first run.", expanded=True)
 
         try:
             # --- ReAct LOOP ---
@@ -145,7 +188,7 @@ if user_input:
             for turn in range(max_turns):
                 # Call Model
                 try:
-                    status_container.write(f"Thinking (Turn {turn+1})...")
+                    status_container.write(f"AI Brain: Modal MedGemma 27B (Turn {turn+1})...")
                     response_text = call_model(context_messages)
                 except Exception as e:
                     status_container.update(label="System Warning", state="error")
