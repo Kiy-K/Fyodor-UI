@@ -1,45 +1,57 @@
 import streamlit as st
-import prompts
-from jules_brain import ask_fastmcp
+from backend import get_response
+from PIL import Image
 
-st.set_page_config(page_title=prompts.APP_TITLE, page_icon=prompts.APP_ICON)
+st.set_page_config(page_title="MedGemma Vision Assistant", page_icon="👁️")
 
-st.title(f"{prompts.APP_ICON} {prompts.APP_TITLE}")
+st.title("👁️ MedGemma Vision Assistant")
+st.caption("Powered by Modal SGLang Server")
 
-# Initialize chat history
+# Initialize Chat History
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat messages
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# Sidebar: Image Upload
+with st.sidebar:
+    st.header("Multimodal Input")
+    uploaded_image = st.file_uploader("Upload Medical Image (X-Ray, MRI, etc.)", type=["png", "jpg", "jpeg"])
 
-# Chat input
-if prompt := st.chat_input("How can I help you?"):
-    # Display user message
+    if uploaded_image:
+        # Display preview
+        image = Image.open(uploaded_image)
+        st.image(image, caption="Uploaded Image", use_container_width=True)
+
+# Main Chat Interface
+# Display history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        # If there was an image associated with this message, we could display it,
+        # but for now we just show the preview in sidebar for the *current* turn.
+        # Ideally, we should store image in history if we want persistent display,
+        # but requirement is simple chat interface.
+
+# User Input
+if prompt := st.chat_input("Ask about the image or describe symptoms..."):
+    # 1. Display User Message
     with st.chat_message("user"):
         st.markdown(prompt)
+        if uploaded_image:
+             st.info("Attached Image")
+
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Get response
+    # 2. Get Response
     with st.chat_message("assistant"):
-        with st.spinner(prompts.CONNECTING_MSG):
-            response_obj = ask_fastmcp(prompt)
+        # Pass text and the uploaded file object to backend
+        response_stream = get_response(prompt, image_file=uploaded_image)
 
-        # Determine how to display response based on its type
-        # The return type of the custom client.responses.create is unknown,
-        # so we try to extract content or default to string representation.
-        content = str(response_obj)
+        # Stream the result
+        full_response = st.write_stream(response_stream)
 
-        # Attempt to make it cleaner if it's a simple object with a 'content' or 'output' attribute
-        # (This is speculative based on common patterns, but fallback is safe)
-        if hasattr(response_obj, 'output'):
-            content = response_obj.output
-        elif hasattr(response_obj, 'content'):
-            content = response_obj.content
-        elif isinstance(response_obj, dict) and 'output' in response_obj:
-            content = response_obj['output']
+    # 3. Save Assistant Message
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-        st.markdown(content)
-        st.session_state.messages.append({"role": "assistant", "content": content})
+    # Optional: Clear uploaded image after send?
+    # Usually better to keep it if user has follow up questions about same image.
+    # We leave it as is.
