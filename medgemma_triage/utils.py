@@ -3,6 +3,7 @@ import json
 import httpx
 import base64
 import asyncio
+import re
 from typing import Generator, Tuple, Dict, Any, List
 from openai import OpenAI
 import streamlit as st
@@ -22,6 +23,10 @@ if not MCP_SERVER_URL.endswith("/call_tool"):
     MCP_TOOL_ENDPOINT = f"{MCP_SERVER_URL.rstrip('/')}/call_tool"
 else:
     MCP_TOOL_ENDPOINT = MCP_SERVER_URL
+
+# --- Constants ---
+THOUGHT_PATTERN = re.compile(r'(<think>|<unused94>)(?:\s*thought)?(.*?)(</think>|<unused95>)', re.DOTALL)
+JSON_PATTERN = re.compile(r'```json\s*(\{.*?\})\s*```', re.DOTALL)
 
 # --- Tool Definitions ---
 # Note: Media tools have EMPTY parameters in the schema exposed to the LLM.
@@ -159,6 +164,50 @@ def call_fastmcp_tool(tool_name: str, args: dict) -> str:
         return f"Error calling {tool_name}: {e.response.text}"
     except Exception as e:
         return f"Connection Error ({tool_name}): {str(e)}"
+
+def parse_medgemma_response(raw_text: str) -> Dict[str, Any]:
+    """
+    Parses the raw response from MedGemma to extract:
+    1. Thought process (<think> or <unused94>)
+    2. JSON data block (```json ... ```)
+    3. The final Markdown report (everything else)
+    """
+    if not raw_text:
+        return {
+            "thought": "",
+            "markdown_report": "",
+            "json_data": None
+        }
+
+    # 1. Extract Thought (support both <think> and <unused94>)
+    thought_match = THOUGHT_PATTERN.search(raw_text)
+    if thought_match:
+        thought = thought_match.group(2).strip()
+        # Optimization: Use slice instead of sub for the first match
+        # This avoids a second regex pass over the string
+        s_start, s_end = thought_match.span()
+        clean_text = (raw_text[:s_start] + raw_text[s_end:]).strip()
+    else:
+        thought = ""
+        clean_text = raw_text.strip()
+
+    # 2. Extract JSON (Robust fallback)
+    json_data = None
+    json_match = JSON_PATTERN.search(clean_text)
+    if json_match:
+        try:
+            json_str = json_match.group(1)
+            json_data = json.loads(json_str)
+            # Remove JSON block from markdown report
+            clean_text = JSON_PATTERN.sub('', clean_text).strip()
+        except json.JSONDecodeError:
+            pass
+
+    return {
+        "thought": thought,
+        "markdown_report": clean_text,
+        "json_data": json_data
+    }
 
 # --- The Agent Loop ---
 
