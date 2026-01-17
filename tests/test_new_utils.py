@@ -25,9 +25,9 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         mock_client.post.return_value = mock_response
 
         # When mocking AsyncClient as a context manager if needed, but here we pass client directly
-        # The function signature is call_fastmcp_tool_async(name, args, client)
+        # The function signature is call_tool_async(name, args, client)
 
-        result = await utils.call_fastmcp_tool_async("test_tool", {}, mock_client)
+        result = await tools.call_tool_async("test_tool", {}, mock_client)
         self.assertEqual(result, "Tool Result")
 
     @patch("medgemma_triage.utils.httpx.AsyncClient")
@@ -40,7 +40,7 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         mock_client = AsyncMock()
         mock_client.post.return_value = mock_response
 
-        result = await utils.call_fastmcp_tool_async("test_tool", {}, mock_client)
+        result = await tools.call_tool_async("test_tool", {}, mock_client)
         self.assertIn("Connection Error (test_tool): FastMCP Tool Error: Something broke", result)
 
 if __name__ == "__main__":

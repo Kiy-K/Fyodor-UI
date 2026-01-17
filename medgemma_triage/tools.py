@@ -2,7 +2,7 @@ import os
 import json
 import httpx
 import streamlit as st
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # --- Configuration ---
 def get_config(key, default=None):
@@ -100,6 +100,28 @@ TOOLS_SCHEMA = [
     }
 ]
 
+def _parse_mcp_response(resp_data: dict) -> str:
+    """
+    Parses the JSON-RPC response from the FastMCP server.
+    Extracted for reuse between sync and async implementations.
+    """
+    if resp_data.get("isError"):
+        content = resp_data.get("content", [])
+        error_msg = "Unknown Error"
+        if content and isinstance(content, list) and len(content) > 0:
+                error_msg = content[0].get("text", str(content))
+        raise Exception(f"FastMCP Tool Error: {error_msg}")
+
+    content = resp_data.get("content", [])
+    if not content or not isinstance(content, list):
+        return ""
+
+    # Return text from the first content block
+    first_block = content[0]
+    if first_block.get("type") == "text":
+        return first_block.get("text", "")
+    return str(first_block)
+
 def call_fastmcp_tool(tool_name: str, args: dict) -> str:
     """
     Synchronously calls the FastMCP Cloud endpoint via HTTP POST.
@@ -116,24 +138,33 @@ def call_fastmcp_tool(tool_name: str, args: dict) -> str:
         response.raise_for_status()
 
         # Parse MCP JSON-RPC Response
-        resp_data = response.json()
+        return _parse_mcp_response(response.json())
 
-        if resp_data.get("isError"):
-            content = resp_data.get("content", [])
-            error_msg = "Unknown Error"
-            if content and isinstance(content, list) and len(content) > 0:
-                    error_msg = content[0].get("text", str(content))
-            raise Exception(f"FastMCP Tool Error: {error_msg}")
+    except httpx.HTTPStatusError as e:
+        return f"Error calling {tool_name}: {e.response.text}"
+    except Exception as e:
+        return f"Connection Error ({tool_name}): {str(e)}"
 
-        content = resp_data.get("content", [])
-        if not content or not isinstance(content, list):
-            return ""
+async def call_tool_async(tool_name: str, args: dict, client: Optional[httpx.AsyncClient] = None) -> str:
+    """
+    Asynchronously calls the FastMCP Cloud endpoint via HTTP POST.
+    Optimized to reuse a provided AsyncClient, or use a temporary one if needed.
+    """
+    payload = {
+        "name": tool_name,
+        "arguments": args
+    }
 
-        # Return text from the first content block
-        first_block = content[0]
-        if first_block.get("type") == "text":
-            return first_block.get("text", "")
-        return str(first_block)
+    try:
+        if client:
+            response = await client.post(MCP_TOOL_ENDPOINT, json=payload)
+        else:
+            # Fallback for isolated calls, though client reuse is preferred
+            async with httpx.AsyncClient(timeout=60.0) as temp_client:
+                response = await temp_client.post(MCP_TOOL_ENDPOINT, json=payload)
+
+        response.raise_for_status()
+        return _parse_mcp_response(response.json())
 
     except httpx.HTTPStatusError as e:
         return f"Error calling {tool_name}: {e.response.text}"
@@ -143,15 +174,5 @@ def call_fastmcp_tool(tool_name: str, args: dict) -> str:
 def get_available_tools():
     """
     Helper to list tools for debugging.
-    This was requested in the task description.
-    Since we don't have the 'mcp' library Client, we use a placeholder
-    or we could implement it if the FastMCP endpoint supports 'list_tools'.
-    For now, we return the local schema as a representation.
     """
-    # If the endpoint supports a list_tools capability via POST or GET, we could use _HTTP_CLIENT here.
-    # But based on the provided code snippet which used 'await client.list_tools()',
-    # and since we are strictly in 'httpx' land, we will just return the local definitions or a message.
-
-    # Implementing a best-effort list_tools using the JSON-RPC if possible,
-    # or just returning the static schema for now as we don't know the list method name for the endpoint.
     return TOOLS_SCHEMA
