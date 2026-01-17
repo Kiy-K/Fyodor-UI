@@ -3,12 +3,13 @@ import json
 import httpx
 import base64
 import asyncio
+import re
 from typing import AsyncGenerator, Tuple, Dict, Any, List
 from openai import AsyncOpenAI
 import streamlit as st
 
 # Import from the new tools module
-from medgemma_triage.tools import TOOLS_SCHEMA, call_fastmcp_tool
+from medgemma_triage.tools import TOOLS_SCHEMA, call_tool_async
 
 # --- Configuration ---
 def get_config(key, default=None):
@@ -16,15 +17,13 @@ def get_config(key, default=None):
         return st.secrets[key]
     return os.getenv(key, default)
 
-MCP_SERVER_URL = get_config("MCP_SERVER_URL", "http://localhost:8000")
 MEDGEMMA_API_URL = get_config("MEDGEMMA_API_URL", "http://localhost:30000/v1")
 MEDGEMMA_API_KEY = get_config("MEDGEMMA_API_KEY", "EMPTY")
 
-# Ensure URL ends correctly for the specific endpoint
-if not MCP_SERVER_URL.endswith("/call_tool"):
-    MCP_TOOL_ENDPOINT = f"{MCP_SERVER_URL.rstrip('/')}/call_tool"
-else:
-    MCP_TOOL_ENDPOINT = MCP_SERVER_URL
+# --- Compiled Regex ---
+THOUGHT_PATTERN = re.compile(r'<think>(.*?)</think>', re.DOTALL)
+THOUGHT_REMOVE_PATTERN = re.compile(r'<think>.*?</think>', re.DOTALL)
+JSON_PATTERN = re.compile(r'(\{.*\})', re.DOTALL)
 
 # --- Helper Functions ---
 
@@ -33,15 +32,13 @@ def parse_medgemma_response(raw_text: str) -> Dict[str, Any]:
     Parses the response from MedGemma which might include <think> tags.
     Extracts 'thought', 'markdown_report', and attempts to parse any JSON.
     """
-    import re
-
     thought = ""
     # Extract thought block
-    thought_match = re.search(r'<think>(.*?)</think>', raw_text, re.DOTALL)
+    thought_match = THOUGHT_PATTERN.search(raw_text)
     if thought_match:
         thought = thought_match.group(1).strip()
         # Remove thought from the main text for the report
-        clean_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
+        clean_text = THOUGHT_REMOVE_PATTERN.sub('', raw_text).strip()
     else:
         clean_text = raw_text.strip()
 
@@ -50,7 +47,7 @@ def parse_medgemma_response(raw_text: str) -> Dict[str, Any]:
     # Simple heuristic to find a JSON object
     try:
         # Look for { ... } block
-        json_match = re.search(r'(\{.*\})', clean_text, re.DOTALL)
+        json_match = JSON_PATTERN.search(clean_text)
         if json_match:
             potential_json = json_match.group(1)
             json_data = json.loads(potential_json)
@@ -80,45 +77,6 @@ def encode_to_base64(file_obj) -> str:
         return base64.b64encode(file_bytes).decode('utf-8')
     except Exception as e:
         return None
-
-async def call_fastmcp_tool_async(tool_name: str, args: dict, client: httpx.AsyncClient) -> str:
-    """
-    Asynchronously calls the FastMCP Cloud endpoint via HTTP POST.
-    Uses the provided shared client to avoid repeated initialization.
-    """
-    payload = {
-        "name": tool_name,
-        "arguments": args
-    }
-
-    try:
-        response = await client.post(MCP_TOOL_ENDPOINT, json=payload)
-        response.raise_for_status()
-
-        # Parse MCP JSON-RPC Response
-        resp_data = response.json()
-
-        if resp_data.get("isError"):
-            content = resp_data.get("content", [])
-            error_msg = "Unknown Error"
-            if content and isinstance(content, list) and len(content) > 0:
-                    error_msg = content[0].get("text", str(content))
-            raise Exception(f"FastMCP Tool Error: {error_msg}")
-
-        content = resp_data.get("content", [])
-        if not content or not isinstance(content, list):
-            return ""
-
-        # Return text from the first content block
-        first_block = content[0]
-        if first_block.get("type") == "text":
-            return first_block.get("text", "")
-        return str(first_block)
-
-    except httpx.HTTPStatusError as e:
-        return f"Error calling {tool_name}: {e.response.text}"
-    except Exception as e:
-        return f"Connection Error ({tool_name}): {str(e)}"
 
 # --- The Agent Loop ---
 
@@ -210,7 +168,8 @@ async def run_agent_loop_async(
                                 pass
 
                         # Execute Tool
-                        result = await call_fastmcp_tool_async(fn_name, args, http_client)
+                        # Changed: Using call_tool_async imported from tools.py
+                        result = await call_tool_async(fn_name, args, client=http_client)
 
                         # Add result to history
                         messages.append({
