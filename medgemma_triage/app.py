@@ -22,14 +22,14 @@ st.set_page_config(
 st.markdown("""
     <style>
     .reportview-container {
-        background: #f0f2f6;
+        background: #F5F7F8;
     }
     .main-header {
         font-family: 'Helvetica Neue', sans-serif;
-        color: #2c3e50;
+        color: #37474F;
     }
     .stApp {
-        background-color: #FFFFFF;
+        background-color: #F5F7F8;
     }
     .triage-card {
         padding: 20px;
@@ -42,7 +42,7 @@ st.markdown("""
     .stable { background-color: #27ae60; }
 
     div.stButton > button:first-child {
-        background-color: #008080;
+        background-color: #00796B;
         color: white;
     }
     </style>
@@ -86,17 +86,24 @@ with st.sidebar:
             tool_list = tools.list_tools()
             st.json(tool_list)
 
+    show_history = st.toggle("Show Patient History", value=False)
+
     if st.button("Reset Session"):
         st.session_state.messages = []
+        st.session_state.draft_text = ""
         st.rerun()
 
-    with st.sidebar.expander("📤 Media Upload"):
+    with st.sidebar.expander("📤 Legacy Upload"):
         uploaded_image = st.file_uploader("Upload Medical Image (X-ray, MRI, etc.)", type=['jpg', 'jpeg', 'png'])
         uploaded_audio = st.file_uploader("Upload Medical Recording (Patient voice, doctor notes)", type=['wav', 'mp3', 'm4a'])
 
-# Initialize Chat History
+# Initialize State
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "draft_text" not in st.session_state:
+    st.session_state.draft_text = ""
+if "last_processed_audio" not in st.session_state:
+    st.session_state.last_processed_audio = None
 
 # 3. Main Interface
 st.markdown("<h1 class='main-header'>🏥 MedGemma Triage System</h1>", unsafe_allow_html=True)
@@ -115,70 +122,38 @@ for msg in st.session_state.messages:
                     elif item["type"] == "image_url":
                         st.image(item["image_url"]["url"])
             else:
-                # Handle structured display for past messages if needed
                 st.write(msg["content"])
 
-# 4. Logic & ReAct Loop
-def call_model(messages):
-    """Calls the remote model via OpenAI client."""
-    client = OpenAI(
-        base_url=os.getenv("MODAL_API_URL"),
-        api_key=os.getenv("MODAL_API_KEY", "dummy")
-    )
+# 4. Helper Function: Run Triage Logic
+def run_triage_engine(user_text, image_obj=None):
+    """Executes the full ReAct loop for a given text and optional image."""
 
-    try:
-        response = client.chat.completions.create(
-            model="google/medgemma-27b-it",
-            messages=messages,
-            temperature=temperature,
-            max_tokens=2048
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        # Cold start handling
-        error_msg = str(e)
-        if "503" in error_msg or "timeout" in error_msg.lower() or "connection error" in error_msg.lower():
-            raise Exception("System is warming up (Cold Start). Please wait 30-60 seconds and try again.")
-        raise e
+    # 1. Prepare Message Content (Multimodal)
+    message_content = user_text
 
-user_input = st.chat_input("Describe patient symptoms (e.g., '45M with chest pain')...")
-
-if user_input:
-    # 1. Handle Audio
-    if uploaded_audio:
-        with st.status("Initializing Medical Engines (Ear & Brain)... This may take a minute on first run.") as status:
-            status.write("AI Ear: Modal MedASR")
-            audio_bytes = uploaded_audio.read()
-            transcription = tools.transcribe_audio(audio_bytes)
-            user_input += f"\n\n[TRANSCRIPTION: {transcription}]"
-            st.write("Transcription added.")
-
-    # 2. Prepare Message Content (Multimodal)
-    message_content = user_input
-
-    if uploaded_image:
-        img_bytes = uploaded_image.read()
+    if image_obj:
+        img_bytes = image_obj.read()
         base64_img = base64.b64encode(img_bytes).decode('utf-8')
         message_content = [
-            {"type": "text", "text": user_input},
+            {"type": "text", "text": user_text},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
         ]
         st.toast("Sending multimodal data to MedGemma 27B...", icon="🚀")
 
-    # Add User Message
+    # Add User Message to History
     st.session_state.messages.append({"role": "user", "content": message_content})
     with st.chat_message("user"):
-        st.markdown(user_input)
-        if uploaded_image:
-            uploaded_image.seek(0)
-            st.image(uploaded_image)
+        st.markdown(user_text)
+        if image_obj:
+            image_obj.seek(0)
+            st.image(image_obj)
 
-    # Prepare Context
+    # Prepare Context for Model
     context_messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}] + st.session_state.messages
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
-        status_container = st.status("Initializing Medical Engines (Ear & Brain)... This may take a minute on first run.", expanded=True)
+        status_container = st.status("Initializing Medical Brain... (May be slow on cold start)", expanded=True)
 
         try:
             # --- ReAct LOOP ---
@@ -199,21 +174,13 @@ if user_input:
                 search_query = utils.extract_search_command(response_text)
 
                 if search_query:
-                    # Show tool usage in UI
                     status_container.markdown(f"**Tool Call:** `[SEARCH: {search_query}]`")
-
-                    # Execute Tool
                     tool_result = tools.search_pubmed(search_query)
                     status_container.write("Tool result received.")
-
-                    # Append interaction to context
-                    # Note: We represent the assistant's call and the tool's result in the message history
-                    # for the next turn.
                     context_messages.append({"role": "assistant", "content": response_text})
                     context_messages.append({"role": "user", "content": f"TOOL_RESULT for '{search_query}':\n{tool_result}"})
 
                 else:
-                    # No tool call -> Final Response
                     final_response_text = response_text
                     status_container.update(label="Diagnosis Complete", state="complete", expanded=False)
                     break
@@ -221,19 +188,16 @@ if user_input:
             # --- DISPLAY RESULTS ---
             parsed = utils.parse_medgemma_response(final_response_text)
 
-            # 1. Show Thoughts
             if parsed["thought"]:
                 with st.expander("🧠 Clinical Reasoning Process"):
                     st.markdown(parsed["thought"])
 
-            # 2. Show Triage Card
             if parsed["is_json"] and isinstance(parsed["data"], dict):
                 data = parsed["data"]
                 level = data.get("triage_level", "UNKNOWN").upper()
                 rationale = data.get("clinical_rationale", "No rationale provided.")
                 actions = data.get("recommended_actions", [])
 
-                # Determine Color
                 color_class = "stable"
                 if level == "EMERGENCY":
                     color_class = "emergency"
@@ -252,12 +216,95 @@ if user_input:
                     for action in actions:
                         st.markdown(f"- {action}")
             else:
-                # Fallback if not valid JSON
                 st.warning("Raw Output (Could not parse JSON):")
                 st.markdown(parsed["data"])
 
-            # Add to history
             st.session_state.messages.append({"role": "assistant", "content": final_response_text})
 
         except Exception as e:
             st.error(f"An unexpected error occurred: {e}")
+
+def call_model(messages):
+    """Calls the remote model via OpenAI client."""
+    client = OpenAI(
+        base_url=os.getenv("MODAL_API_URL"),
+        api_key=os.getenv("MODAL_API_KEY", "dummy")
+    )
+    try:
+        response = client.chat.completions.create(
+            model="google/medgemma-27b-it",
+            messages=messages,
+            temperature=temperature,
+            max_tokens=4096
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        error_msg = str(e)
+        if "503" in error_msg or "timeout" in error_msg.lower() or "connection error" in error_msg.lower():
+            raise Exception("System is warming up (Cold Start). Please wait 30-60 seconds and try again.")
+        raise e
+
+# 5. Live Audio & Legacy Upload Handling
+st.markdown("---")
+st.subheader("🎤 Live Voice Triage")
+
+# Audio Inputs
+col1, col2 = st.columns([1, 4])
+with col1:
+    audio_value = st.audio_input("🎤 Speak Symptoms (MedASR Optimized)")
+
+# Logic to handle new audio inputs (Live or Uploaded)
+new_audio_bytes = None
+source_name = ""
+
+# Prioritize Live Audio if present, then Sidebar Upload
+if audio_value:
+    new_audio_bytes = audio_value.read()
+    source_name = "Live Recording"
+elif uploaded_audio:
+    uploaded_audio.seek(0)
+    new_audio_bytes = uploaded_audio.read()
+    source_name = "Uploaded File"
+
+# Check if we need to transcribe (only if audio changed)
+if new_audio_bytes:
+    # Hash check to avoid re-transcribing same audio on every rerun
+    current_hash = hash(new_audio_bytes)
+    if st.session_state.last_processed_audio != current_hash:
+        with st.status(f"👂 Converting speech to medical text ({source_name})...") as status:
+            transcription = tools.transcribe_audio(new_audio_bytes)
+
+            # Update Draft
+            if st.session_state.draft_text:
+                 st.session_state.draft_text += f"\n\n[TRANSCRIPTION: {transcription}]"
+            else:
+                 st.session_state.draft_text = f"[TRANSCRIPTION: {transcription}]"
+
+            st.session_state.last_processed_audio = current_hash
+            status.write("Done!")
+            st.rerun()
+
+# Draft Area
+draft = st.text_area("📝 Review Transcription / Draft Notes",
+                     value=st.session_state.draft_text,
+                     height=150,
+                     key="draft_input")
+
+# Sync text area changes back to session state
+if draft != st.session_state.draft_text:
+    st.session_state.draft_text = draft
+
+if st.button("🚀 Send to MedGemma", type="primary"):
+    if st.session_state.draft_text.strip():
+        # Execute Triage
+        run_triage_engine(st.session_state.draft_text, uploaded_image)
+        # Clear Draft
+        st.session_state.draft_text = ""
+        st.rerun()
+    else:
+        st.warning("Please record audio or type notes first.")
+
+# Standard Chat Input (Bottom)
+chat_input_val = st.chat_input("Or type a quick message here...")
+if chat_input_val:
+    run_triage_engine(chat_input_val, uploaded_image)

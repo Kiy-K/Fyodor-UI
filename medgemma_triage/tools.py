@@ -98,14 +98,21 @@ def transcribe_audio(file_bytes):
         return "Error: MODAL_ASR_URL not configured."
 
     headers = {
-        "Authorization": f"Bearer {os.getenv('MODAL_API_KEY')}"
+        "Authorization": f"Bearer {os.getenv('MODAL_API_KEY')}",
+        "Content-Type": "application/json"
     }
 
     try:
+        # Encode audio bytes to Base64 string
+        base64_audio = base64.b64encode(file_bytes).decode('utf-8')
+
+        # Construct JSON payload
+        payload = {"audio_data": base64_audio}
+
         response = httpx.post(
             modal_asr_url,
             headers=headers,
-            content=file_bytes,
+            json=payload,
             timeout=60.0
         )
         response.raise_for_status()
