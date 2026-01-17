@@ -127,17 +127,17 @@ with col_left:
             # Streamlit Status Container
             status_box = st.status("Agent Working...", expanded=True)
             response_placeholder = st.empty()
-            full_response = ""
 
-            # Run Loop
-            generator = utils.run_agent_loop(
-                user_input=full_input,
-                context_files=context_files,
-                chat_history=st.session_state.messages[:-1] # Exclude the one we just added to display
-            )
+            async def handle_interaction():
+                full_response = ""
+                # Run Loop
+                generator = utils.run_agent_loop_async(
+                    user_input=full_input,
+                    context_files=context_files,
+                    chat_history=st.session_state.messages[:-1] # Exclude the one we just added to display
+                )
 
-            try:
-                for event_type, content in generator:
+                async for event_type, content in generator:
                     if event_type == "status":
                         status_box.write(f"ℹ️ {content}")
                     elif event_type == "tool":
@@ -150,6 +150,11 @@ with col_left:
                     elif event_type == "error":
                         status_box.update(label="❌ Error", state="error")
                         st.error(content)
+
+                return full_response
+
+            try:
+                full_response = asyncio.run(handle_interaction())
 
                 status_box.update(label="✅ Complete", state="complete", expanded=False)
 
