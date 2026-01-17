@@ -56,12 +56,19 @@ with st.sidebar:
 
     st.subheader("System Status")
 
-    # Check Modal Config
+    # Check Modal Config (Brain)
     modal_url = os.getenv("MODAL_API_URL")
     if modal_url:
-        st.success(f"Backend: Connected (Modal)")
+        st.success(f"Brain: Connected (Modal)")
     else:
-        st.error("Backend: Missing Configuration")
+        st.error("Brain: Missing Configuration")
+
+    # Check Modal ASR Config (Ear)
+    modal_asr_url = os.getenv("MODAL_ASR_URL")
+    if modal_asr_url:
+        st.success(f"Ear: Connected (Modal)")
+    else:
+        st.error("Ear: Missing Configuration")
 
     # Check MCP Config
     mcp_url = os.getenv("MCP_SERVER_URL")
@@ -139,7 +146,8 @@ user_input = st.chat_input("Describe patient symptoms (e.g., '45M with chest pai
 if user_input:
     # 1. Handle Audio
     if uploaded_audio:
-        with st.status("👂 Listening and transcribing via MCP Whisper..."):
+        with st.status("Initializing Medical Engines (Ear & Brain)... This may take a minute on first run.") as status:
+            status.write("AI Ear: Modal MedASR")
             audio_bytes = uploaded_audio.read()
             transcription = tools.transcribe_audio(audio_bytes)
             user_input += f"\n\n[TRANSCRIPTION: {transcription}]"
@@ -170,7 +178,7 @@ if user_input:
 
     with st.chat_message("assistant"):
         placeholder = st.empty()
-        status_container = st.status("Thinking...", expanded=True)
+        status_container = st.status("Initializing Medical Engines (Ear & Brain)... This may take a minute on first run.", expanded=True)
 
         try:
             # --- ReAct LOOP ---
@@ -180,7 +188,7 @@ if user_input:
             for turn in range(max_turns):
                 # Call Model
                 try:
-                    status_container.write(f"Thinking (Turn {turn+1})...")
+                    status_container.write(f"AI Brain: Modal MedGemma 27B (Turn {turn+1})...")
                     response_text = call_model(context_messages)
                 except Exception as e:
                     status_container.update(label="System Warning", state="error")

@@ -10,14 +10,16 @@ import tools
 
 class TestMultimodalLogic(unittest.TestCase):
 
-    @patch('tools.call_mcp_tool')
-    def test_transcribe_audio(self, mock_call_mcp):
-        """Test that transcribe_audio correctly encodes and calls the MCP tool."""
+    @patch('tools.httpx.post')
+    @patch.dict(os.environ, {"MODAL_ASR_URL": "https://fake.modal.run", "MODAL_API_KEY": "fake-key"})
+    def test_transcribe_audio(self, mock_post):
+        """Test that transcribe_audio correctly calls the Modal endpoint."""
 
         # Setup mock return
-        mock_result = MagicMock()
-        mock_result.content = [MagicMock(type='text', text="Patient has a cough.")]
-        mock_call_mcp.return_value = mock_result
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"text": "Patient has a cough."}
+        mock_response.status_code = 200
+        mock_post.return_value = mock_response
 
         # Dummy audio bytes
         audio_data = b"fake_audio_data"
@@ -29,13 +31,12 @@ class TestMultimodalLogic(unittest.TestCase):
         self.assertEqual(transcription, "Patient has a cough.")
 
         # Verify call arguments
-        # Should be base64 encoded
-        import base64
-        expected_b64 = base64.b64encode(audio_data).decode('utf-8')
-
-        mock_call_mcp.assert_called_once_with(
-            "transcribe_medical_audio",
-            {"audio_data": expected_b64}
+        # Should be raw bytes, not base64 for the HTTP endpoint
+        mock_post.assert_called_once_with(
+            "https://fake.modal.run",
+            headers={"Authorization": "Bearer fake-key"},
+            content=audio_data,
+            timeout=60.0
         )
 
     def test_message_formatting_logic(self):

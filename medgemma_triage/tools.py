@@ -1,6 +1,7 @@
 import asyncio
 import os
 import base64
+import httpx
 from fastmcp import Client
 from dotenv import load_dotenv
 
@@ -71,7 +72,7 @@ def triage_patient(data):
     except Exception as e:
         return f"Error triaging patient: {str(e)}"
 
-def transcribe_audio(file_bytes):
+def transcribe_legacy(file_bytes):
     """
     Encodes audio bytes to Base64 and calls the 'transcribe_medical_audio' tool on the MCP server.
     """
@@ -86,4 +87,29 @@ def transcribe_audio(file_bytes):
             return "\n".join([c.text for c in result.content if c.type == 'text'])
         return str(result)
     except Exception as e:
-        return f"Error transcribing audio: {str(e)}"
+        return f"Error transcribing audio (Legacy): {str(e)}"
+
+def transcribe_audio(file_bytes):
+    """
+    Calls the Modal-hosted MedASR service.
+    """
+    modal_asr_url = os.getenv("MODAL_ASR_URL")
+    if not modal_asr_url:
+        return "Error: MODAL_ASR_URL not configured."
+
+    headers = {
+        "Authorization": f"Bearer {os.getenv('MODAL_API_KEY')}"
+    }
+
+    try:
+        response = httpx.post(
+            modal_asr_url,
+            headers=headers,
+            content=file_bytes,
+            timeout=60.0
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result.get("text", "Transcription failed (No text in response).")
+    except Exception as e:
+        return f"ASR Error (Modal): {str(e)}"
