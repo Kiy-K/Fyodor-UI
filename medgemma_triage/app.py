@@ -1,44 +1,220 @@
 import streamlit as st
-from jules_bridge import get_agent_response
+import os
+import time
+from openai import OpenAI
+from dotenv import load_dotenv
+import utils
+import tools
+import prompts
 
-st.set_page_config(page_title="Jules (FastMCP Responses API)", page_icon="🤖")
+# 1. Configuration & Setup
+load_dotenv()
 
-st.title("🤖 Jules (FastMCP Responses API)")
+st.set_page_config(
+    page_title="MedGemma Triage Pro",
+    page_icon="🩺",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Initialize chat history
+# Custom CSS for Professional Medical Look
+st.markdown("""
+    <style>
+    .reportview-container {
+        background: #f0f2f6;
+    }
+    .main-header {
+        font-family: 'Helvetica Neue', sans-serif;
+        color: #2c3e50;
+    }
+    .stApp {
+        background-color: #FFFFFF;
+    }
+    .triage-card {
+        padding: 20px;
+        border-radius: 10px;
+        color: white;
+        margin-bottom: 20px;
+    }
+    .emergency { background-color: #e74c3c; }
+    .urgent { background-color: #e67e22; }
+    .stable { background-color: #27ae60; }
+
+    div.stButton > button:first-child {
+        background-color: #008080;
+        color: white;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# 2. Sidebar & State
+with st.sidebar:
+    st.image("https://img.icons8.com/color/96/caduceus.png", width=80)
+    st.title("MedGemma Pro")
+    st.markdown("---")
+
+    st.subheader("System Status")
+
+    # Check Modal Config
+    modal_url = os.getenv("MODAL_API_URL")
+    if modal_url:
+        st.success(f"Backend: Connected (Modal)")
+    else:
+        st.error("Backend: Missing Configuration")
+
+    # Check MCP Config
+    mcp_url = os.getenv("MCP_SERVER_URL")
+    if mcp_url:
+        st.success(f"MCP: {mcp_url}")
+    else:
+        st.warning("MCP: Not Configured")
+
+    st.markdown("---")
+    st.subheader("Model Settings")
+    temperature = st.slider("Temperature", 0.0, 1.0, 0.2)
+
+    if st.button("List Available Tools"):
+        with st.spinner("Fetching tools..."):
+            tool_list = tools.list_tools()
+            st.json(tool_list)
+
+    if st.button("Reset Session"):
+        st.session_state.messages = []
+        st.rerun()
+
+# Initialize Chat History
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat messages
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# 3. Main Interface
+st.markdown("<h1 class='main-header'>🏥 MedGemma Triage System</h1>", unsafe_allow_html=True)
+st.caption("AI-Powered Clinical Decision Support • v2.0 (Modal + FastMCP)")
 
-# Chat input
-if prompt := st.chat_input("Ask Jules..."):
-    # Display user message
+# Display Chat History
+for msg in st.session_state.messages:
+    if msg["role"] != "system":
+        with st.chat_message(msg["role"]):
+            if isinstance(msg["content"], str):
+                st.markdown(msg["content"])
+            else:
+                # Handle structured display for past messages if needed
+                st.write(msg["content"])
+
+# 4. Logic & ReAct Loop
+def call_model(messages):
+    """Calls the remote model via OpenAI client."""
+    client = OpenAI(
+        base_url=os.getenv("MODAL_API_URL"),
+        api_key=os.getenv("MODAL_API_KEY", "dummy")
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="medgemma", # Model name usually ignored by some serve backends, but required
+            messages=messages,
+            temperature=temperature
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        # Cold start handling
+        error_msg = str(e)
+        if "503" in error_msg or "timeout" in error_msg.lower() or "connection error" in error_msg.lower():
+            raise Exception("System is warming up (Cold Start). Please wait 30-60 seconds and try again.")
+        raise e
+
+user_input = st.chat_input("Describe patient symptoms (e.g., '45M with chest pain')...")
+
+if user_input:
+    # Add User Message
+    st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
-        st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
+        st.markdown(user_input)
 
-    # Get response
+    # Prepare Context
+    context_messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}] + st.session_state.messages
+
     with st.chat_message("assistant"):
-        with st.spinner("Calling v1/responses..."):
-            resp = get_agent_response(prompt)
+        placeholder = st.empty()
+        status_container = st.status("Thinking...", expanded=True)
 
-        st.subheader("Raw Response Object Inspection")
-        st.write(resp)
+        try:
+            # --- ReAct LOOP ---
+            max_turns = 5
+            final_response_text = ""
 
-        # Attempt to display content nicely if possible
-        content = str(resp)
-        if hasattr(resp, 'output_text'):
-            content = resp.output_text
-        elif hasattr(resp, 'content'):
-            content = resp.content
-        elif isinstance(resp, dict) and 'output' in resp:
-            content = resp['output']
+            for turn in range(max_turns):
+                # Call Model
+                try:
+                    status_container.write(f"Thinking (Turn {turn+1})...")
+                    response_text = call_model(context_messages)
+                except Exception as e:
+                    status_container.update(label="System Warning", state="error")
+                    st.error(str(e))
+                    st.stop()
 
-        # Only add to history if we found a string representation that looks like a message
-        # Otherwise we just leave the raw inspection above for this refactor.
-        # But to be helpful, we append the stringified version.
-        st.session_state.messages.append({"role": "assistant", "content": content})
+                # Check for Search Command
+                search_query = utils.extract_search_command(response_text)
+
+                if search_query:
+                    # Show tool usage in UI
+                    status_container.markdown(f"**Tool Call:** `[SEARCH: {search_query}]`")
+
+                    # Execute Tool
+                    tool_result = tools.search_pubmed(search_query)
+                    status_container.write("Tool result received.")
+
+                    # Append interaction to context
+                    # Note: We represent the assistant's call and the tool's result in the message history
+                    # for the next turn.
+                    context_messages.append({"role": "assistant", "content": response_text})
+                    context_messages.append({"role": "user", "content": f"TOOL_RESULT for '{search_query}':\n{tool_result}"})
+
+                else:
+                    # No tool call -> Final Response
+                    final_response_text = response_text
+                    status_container.update(label="Diagnosis Complete", state="complete", expanded=False)
+                    break
+
+            # --- DISPLAY RESULTS ---
+            parsed = utils.parse_medgemma_response(final_response_text)
+
+            # 1. Show Thoughts
+            if parsed["thought"]:
+                with st.expander("🧠 Clinical Reasoning Process"):
+                    st.markdown(parsed["thought"])
+
+            # 2. Show Triage Card
+            if parsed["is_json"] and isinstance(parsed["data"], dict):
+                data = parsed["data"]
+                level = data.get("triage_level", "UNKNOWN").upper()
+                rationale = data.get("clinical_rationale", "No rationale provided.")
+                actions = data.get("recommended_actions", [])
+
+                # Determine Color
+                color_class = "stable"
+                if level == "EMERGENCY":
+                    color_class = "emergency"
+                elif level == "URGENT":
+                    color_class = "urgent"
+
+                st.markdown(f"""
+                <div class="triage-card {color_class}">
+                    <h2>{level}</h2>
+                    <p><strong>Rationale:</strong> {rationale}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                if actions:
+                    st.markdown("### 📋 Recommended Actions")
+                    for action in actions:
+                        st.markdown(f"- {action}")
+            else:
+                # Fallback if not valid JSON
+                st.warning("Raw Output (Could not parse JSON):")
+                st.markdown(parsed["data"])
+
+            # Add to history
+            st.session_state.messages.append({"role": "assistant", "content": final_response_text})
+
+        except Exception as e:
+            st.error(f"An unexpected error occurred: {e}")
