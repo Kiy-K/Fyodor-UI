@@ -124,7 +124,7 @@ def transcribe_audio(file_bytes):
 
 def call_fast_triage(messages):
     """
-    Calls the Groq API (Fast Path) using llama-3.3-70b-versatile.
+    Calls the Groq API (Fast Path) using lmeta-llama/llama-4-maverick-17b-128e-instruct.
     """
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -133,7 +133,7 @@ def call_fast_triage(messages):
     try:
         client = Groq(api_key=api_key)
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
             messages=messages,
             temperature=0.3,
             max_completion_tokens=4096,
