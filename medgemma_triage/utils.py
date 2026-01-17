@@ -120,6 +120,16 @@ def encode_to_base64(file_obj) -> str:
     except Exception as e:
         return None
 
+# Global client for FastMCP calls to avoid repeated initialization
+_FASTMCP_CLIENT = None
+
+def get_fastmcp_client() -> httpx.Client:
+    """Lazily initializes and returns the shared HTTP client."""
+    global _FASTMCP_CLIENT
+    if _FASTMCP_CLIENT is None:
+        _FASTMCP_CLIENT = httpx.Client(timeout=60.0)
+    return _FASTMCP_CLIENT
+
 def call_fastmcp_tool(tool_name: str, args: dict) -> str:
     """
     Synchronously calls the FastMCP Cloud endpoint via HTTP POST.
@@ -130,30 +140,30 @@ def call_fastmcp_tool(tool_name: str, args: dict) -> str:
     }
 
     try:
-        # Using a timeout of 60s for potentially long running tools
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(MCP_TOOL_ENDPOINT, json=payload)
-            response.raise_for_status()
+        # Re-use the shared client
+        client = get_fastmcp_client()
+        response = client.post(MCP_TOOL_ENDPOINT, json=payload)
+        response.raise_for_status()
 
-            # Parse MCP JSON-RPC Response
-            resp_data = response.json()
+        # Parse MCP JSON-RPC Response
+        resp_data = response.json()
 
-            if resp_data.get("isError"):
-                content = resp_data.get("content", [])
-                error_msg = "Unknown Error"
-                if content and isinstance(content, list) and len(content) > 0:
-                     error_msg = content[0].get("text", str(content))
-                raise Exception(f"FastMCP Tool Error: {error_msg}")
-
+        if resp_data.get("isError"):
             content = resp_data.get("content", [])
-            if not content or not isinstance(content, list):
-                return ""
+            error_msg = "Unknown Error"
+            if content and isinstance(content, list) and len(content) > 0:
+                    error_msg = content[0].get("text", str(content))
+            raise Exception(f"FastMCP Tool Error: {error_msg}")
 
-            # Return text from the first content block
-            first_block = content[0]
-            if first_block.get("type") == "text":
-                return first_block.get("text", "")
-            return str(first_block)
+        content = resp_data.get("content", [])
+        if not content or not isinstance(content, list):
+            return ""
+
+        # Return text from the first content block
+        first_block = content[0]
+        if first_block.get("type") == "text":
+            return first_block.get("text", "")
+        return str(first_block)
 
     except httpx.HTTPStatusError as e:
         return f"Error calling {tool_name}: {e.response.text}"
