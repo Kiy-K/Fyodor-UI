@@ -3,6 +3,7 @@ import io
 import json
 from unittest.mock import MagicMock, patch, AsyncMock
 from medgemma_triage import utils
+from medgemma_triage import tools
 
 class TestUtils(unittest.IsolatedAsyncioTestCase):
     def test_encode_to_base64_string(self):

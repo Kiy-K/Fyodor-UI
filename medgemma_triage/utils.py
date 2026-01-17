@@ -7,6 +7,9 @@ from typing import AsyncGenerator, Tuple, Dict, Any, List
 from openai import AsyncOpenAI
 import streamlit as st
 
+# Import from the new tools module
+from medgemma_triage.tools import TOOLS_SCHEMA, call_fastmcp_tool
+
 # --- Configuration ---
 def get_config(key, default=None):
     if hasattr(st, "secrets") and key in st.secrets:
@@ -23,84 +26,42 @@ if not MCP_SERVER_URL.endswith("/call_tool"):
 else:
     MCP_TOOL_ENDPOINT = MCP_SERVER_URL
 
-# --- Tool Definitions ---
-# Note: Media tools have EMPTY parameters in the schema exposed to the LLM.
-# The actual heavy data is injected by the frontend.
-TOOLS_SCHEMA = [
-    {
-        "type": "function",
-        "function": {
-            "name": "transcribe_medical_audio",
-            "description": "Transcribes clinical voice notes from the attached audio context.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "analyze_xray_multiscale",
-            "description": "Analyzes the attached X-Ray image for clinical findings.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "extract_xray_metadata",
-            "description": "Extracts patient metadata (Name, DOB, ID) via OCR from the attached X-Ray.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "triage_patient",
-            "description": "Calculates the NEWS2 score and clinical risk.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "hr": {"type": "integer", "description": "Heart Rate"},
-                    "sbp": {"type": "integer", "description": "Systolic Blood Pressure"},
-                    "rr": {"type": "integer", "description": "Respiratory Rate"},
-                    "temp": {"type": "number", "description": "Temperature in Celsius"},
-                    "spo2": {"type": "integer", "description": "Oxygen Saturation (%)"},
-                    "consciousness": {"type": "string", "enum": ["Alert", "Voice", "Pain", "Unresponsive"]},
-                    "oxygen": {"type": "boolean", "description": "Is patient on supplemental oxygen?"}
-                },
-                "required": ["hr", "sbp", "rr", "temp", "spo2", "consciousness", "oxygen"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "sequential_thinking",
-            "description": "A tool for structured clinical reasoning and step-by-step analysis.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "thought": {"type": "string", "description": "The current step of reasoning."},
-                    "needs_more_time": {"type": "boolean", "description": "If true, the model needs to think more."}
-                },
-                "required": ["thought", "needs_more_time"]
-            }
-        }
-    }
-]
-
 # --- Helper Functions ---
+
+def parse_medgemma_response(raw_text: str) -> Dict[str, Any]:
+    """
+    Parses the response from MedGemma which might include <think> tags.
+    Extracts 'thought', 'markdown_report', and attempts to parse any JSON.
+    """
+    import re
+
+    thought = ""
+    # Extract thought block
+    thought_match = re.search(r'<think>(.*?)</think>', raw_text, re.DOTALL)
+    if thought_match:
+        thought = thought_match.group(1).strip()
+        # Remove thought from the main text for the report
+        clean_text = re.sub(r'<think>.*?</think>', '', raw_text, flags=re.DOTALL).strip()
+    else:
+        clean_text = raw_text.strip()
+
+    # Try to find JSON at the end or standalone
+    json_data = {}
+    # Simple heuristic to find a JSON object
+    try:
+        # Look for { ... } block
+        json_match = re.search(r'(\{.*\})', clean_text, re.DOTALL)
+        if json_match:
+            potential_json = json_match.group(1)
+            json_data = json.loads(potential_json)
+    except:
+        pass
+
+    return {
+        "thought": thought,
+        "markdown_report": clean_text,
+        "json_data": json_data
+    }
 
 def encode_to_base64(file_obj) -> str:
     """Encodes a file-like object to Base64 string."""
