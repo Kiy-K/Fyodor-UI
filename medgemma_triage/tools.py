@@ -16,7 +16,7 @@ async def _call_tool_async(tool_name, args=None):
 
     # Create the client.
     # Note: fastmcp.Client uses 'url' for SSE.
-    async with Client(url=MCP_SERVER_URL) as client:
+    async with Client(MCP_SERVER_URL) as client:
         result = await client.call_tool(tool_name, arguments=args)
         return result
 
@@ -27,7 +27,7 @@ def call_mcp_tool(tool_name, args=None):
     return asyncio.run(_call_tool_async(tool_name, args))
 
 async def _list_tools_async():
-    async with Client(url=MCP_SERVER_URL) as client:
+    async with Client(MCP_SERVER_URL) as client:
         tools = await client.list_tools()
         return tools
 
