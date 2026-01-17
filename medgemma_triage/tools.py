@@ -1,5 +1,6 @@
 import asyncio
 import os
+import base64
 from fastmcp import Client
 from dotenv import load_dotenv
 
@@ -69,3 +70,20 @@ def triage_patient(data):
         return str(result)
     except Exception as e:
         return f"Error triaging patient: {str(e)}"
+
+def transcribe_audio(file_bytes):
+    """
+    Encodes audio bytes to Base64 and calls the 'transcribe_medical_audio' tool on the MCP server.
+    """
+    try:
+        # Encode bytes to base64 string
+        base64_audio = base64.b64encode(file_bytes).decode('utf-8')
+
+        # Call the MCP tool
+        result = call_mcp_tool("transcribe_medical_audio", {"audio_data": base64_audio})
+
+        if hasattr(result, 'content'):
+            return "\n".join([c.text for c in result.content if c.type == 'text'])
+        return str(result)
+    except Exception as e:
+        return f"Error transcribing audio: {str(e)}"
