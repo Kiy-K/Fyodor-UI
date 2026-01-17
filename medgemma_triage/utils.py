@@ -28,6 +28,7 @@ else:
 async def call_mcp_tool_async(tool_name: str, args: dict) -> str:
     """
     Async function to call the FastMCP HTTP endpoint.
+    Handles the standard MCP JSON-RPC style response structure.
     """
     timeout = httpx.Timeout(60.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -39,20 +40,36 @@ async def call_mcp_tool_async(tool_name: str, args: dict) -> str:
             response = await client.post(MCP_TOOL_ENDPOINT, json=payload)
             response.raise_for_status()
 
-            # FastMCP usually returns the result content.
-            # If the tool returns a string, it might be in response.text or response.json() depending on implementation.
-            # Assuming standard JSON response where the result might be wrapped or just the content.
-            # However, the user said "FastMCP Cloud".
-            # Let's return the text body for maximum flexibility, or parse if it's JSON.
+            # Parse MCP JSON-RPC Response
+            resp_data = response.json()
 
-            # If the response is JSON, let's try to see if it has a 'content' field or similar.
-            # But specific instructions said: Payload Structure for request.
-            # It didn't specify response structure. I'll assume the body IS the result or contains it.
-            # Let's try to return the text.
-            return response.text
+            # Check for error flag
+            if resp_data.get("isError"):
+                # Try to extract error message if available
+                content = resp_data.get("content", [])
+                error_msg = "Unknown Error"
+                if content and isinstance(content, list) and len(content) > 0:
+                     error_msg = content[0].get("text", str(content))
+                raise Exception(f"FastMCP Tool Error: {error_msg}")
+
+            # Extract content
+            content = resp_data.get("content", [])
+            if not content or not isinstance(content, list):
+                return ""
+
+            # Return text from the first content block
+            # (Assuming single text response for now as per specs)
+            first_block = content[0]
+            if first_block.get("type") == "text":
+                return first_block.get("text", "")
+
+            return str(first_block)
 
         except httpx.HTTPStatusError as e:
             return f"Error calling {tool_name}: {e.response.text}"
+        except json.JSONDecodeError:
+            # Fallback if response isn't JSON
+            return response.text
         except Exception as e:
             return f"Connection Error ({tool_name}): {str(e)}"
 

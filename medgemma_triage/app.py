@@ -200,10 +200,19 @@ with col_left:
             with st.spinner("Consulting..."):
                 try:
                     # Use the SGLang-compatible wrapper
-                    response = utils.run_chat(messages=full_messages)
+                    raw_response = utils.run_chat(messages=full_messages)
+                    parsed = utils.parse_medgemma_response(raw_response)
 
-                    st.markdown(response)
-                    st.session_state.messages.append({"role": "assistant", "content": response})
+                    # Display Thought
+                    if parsed["thought"]:
+                         with st.expander("🧠 Clinical Reasoning (Chat)", expanded=False):
+                            st.markdown(f"<div class='thought-block'>{parsed['thought']}</div>", unsafe_allow_html=True)
+
+                    # Display Answer
+                    st.markdown(parsed["markdown_report"])
+
+                    # Update History (Store clean answer)
+                    st.session_state.messages.append({"role": "assistant", "content": parsed["markdown_report"]})
                 except Exception as e:
                     st.error(f"Chat Error: {e}")
 
