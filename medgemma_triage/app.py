@@ -1,10 +1,9 @@
 import streamlit as st
 import os
+import asyncio
 import json
-import httpx
 from dotenv import load_dotenv
 from upstash_redis import Redis
-import tools
 import utils
 
 # 1. Setup & Config
@@ -17,66 +16,45 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Medical Theme
+# Custom CSS
 st.markdown("""
 <style>
-    .stApp { background-color: #F8FAFC; font-family: 'Inter', sans-serif; }
+    .stApp { background-color: #F8FAFC; }
     [data-testid="stSidebar"] { background-color: #FFFFFF; border-right: 1px solid #E2E8F0; }
-    h1, h2, h3 { color: #0F172A; font-weight: 700; }
-    [data-testid="stMetricValue"] { color: #0EA5E9; font-size: 2rem; }
-    .stButton > button { background-color: #0EA5E9; color: white; border-radius: 8px; font-weight: 600; }
-    .stButton > button:hover { background-color: #0284C7; }
+    .stButton > button { border-radius: 8px; font-weight: 600; }
+    div[data-testid="stExpander"] div[role="button"] p { font-size: 1rem; font-weight: 600; }
+
+    /* Thought Block Styling */
+    .thought-block {
+        background-color: #F1F5F9;
+        border-left: 4px solid #64748B;
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 10px;
+        font-family: monospace;
+        font-size: 0.9em;
+        color: #475569;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # 2. Redis Connection
-UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
-UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+# Load from secrets or env
+UPSTASH_URL = utils.get_config("UPSTASH_REDIS_REST_URL")
+UPSTASH_TOKEN = utils.get_config("UPSTASH_REDIS_REST_TOKEN")
 
 @st.cache_resource
 def get_redis_client():
-    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+    if UPSTASH_URL and UPSTASH_TOKEN:
         try:
-            return Redis(url=UPSTASH_REDIS_REST_URL, token=UPSTASH_REDIS_REST_TOKEN)
+            return Redis(url=UPSTASH_URL, token=UPSTASH_TOKEN)
         except Exception:
             return None
     return None
 
 redis_client = get_redis_client()
 
-# 3. Helper Functions (Cached)
-
-@st.cache_data(show_spinner=False, ttl=60)
-def get_triage_score(hr, sbp, rr, temp, spo2, consciousness, oxygen):
-    """Calls triage_patient tool to get NEWS2 score."""
-    args = {
-        "hr": int(hr), "sbp": int(sbp), "rr": int(rr),
-        "temp": float(temp), "spo2": int(spo2),
-        "consciousness": consciousness, "oxygen": bool(oxygen)
-    }
-    # For demo/reliability if MCP is down, we might want a fallback,
-    # but requirement is to use the tool.
-    try:
-        # Call MCP Tool
-        # Result is expected to be a JSON string like '{"score": 7, ...}'
-        result_str = tools.call_mcp_tool("triage_patient", args)
-
-        # Try to parse JSON
-        if isinstance(result_str, str):
-            # Sometimes tools return extra text, try to find JSON
-            match = utils.JSON_PATTERN.search(result_str)
-            if match:
-                return json.loads(match.group(0))
-            # Fallback if it's just a number or clean JSON
-            try:
-                return json.loads(result_str)
-            except:
-                return {"score": "?", "error": "Parse Error"}
-        return result_str
-    except Exception as e:
-        return {"score": "?", "error": str(e)}
-
-# 4. Sidebar: Patient Vitals
+# 3. Sidebar: Patient Vitals & Triage
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=64)
     st.title("Patient Vitals")
@@ -94,180 +72,256 @@ with st.sidebar:
         consciousness = st.selectbox("Consciousness", ["Alert", "Voice", "Pain", "Unresponsive"])
         o2_supp = st.checkbox("Oxygen Support?")
 
-    # Reactive Calculation
-    triage_result = get_triage_score(hr, sbp, rr, temp, spo2, consciousness, o2_supp)
+    # Reactive Triage Call
+    # Calls backend tool every time inputs change
+    triage_args = {
+        "hr": int(hr), "sbp": int(sbp), "rr": int(rr),
+        "temp": float(temp), "spo2": int(spo2),
+        "consciousness": consciousness, "oxygen": bool(o2_supp)
+    }
     
-    # Display Metric
+    # Call backend synchronously
+    # We catch errors to avoid breaking the UI if backend is down
+    try:
+        triage_resp = utils.call_mcp_tool("triage_patient", triage_args)
+        # Expecting JSON string or direct result
+        try:
+            if isinstance(triage_resp, str):
+                # Try to extract JSON if it's wrapped in text
+                json_match = utils.JSON_PATTERN.search(triage_resp)
+                if json_match:
+                    triage_data = json.loads(json_match.group(0))
+                else:
+                     triage_data = json.loads(triage_resp)
+            else:
+                triage_data = triage_resp
+        except:
+            triage_data = {"score": "?", "risk": "Error parsing result"}
+    except Exception as e:
+        triage_data = {"score": "Err", "risk": "Connection Fail"}
+
     st.divider()
-    score = triage_result.get("score", "N/A")
-    risk = triage_result.get("risk", "Unknown")
+    score = triage_data.get("score", "N/A")
+    risk = triage_data.get("risk", "Unknown")
 
-    st.metric("NEWS2 Score", score, delta=risk, delta_color="inverse")
+    # Determine color based on risk (simple heuristic for UI)
+    delta_color = "normal"
+    if str(risk).lower() in ["high", "medium"]:
+        delta_color = "inverse"
 
-    # Live Chart from Redis
+    st.metric("NEWS2 Score", score, delta=risk, delta_color=delta_color)
+
+    # Redis Chart
     st.subheader("History")
-    chart_data = [0, 1, 0, 2, 5] # Default mock
+    chart_data = []
     if redis_client:
         try:
-            # Fetch last 10 scores
-            history = redis_client.lrange("patient:demo:news2", -10, -1)
+            # Fetch last 20 scores
+            history = redis_client.lrange("patient:news2:history", -20, -1)
             if history:
-                # Convert bytes/strings to int
-                chart_data = [int(float(x)) for x in history]
+                chart_data = [float(x) for x in history]
         except Exception:
-            pass # Keep mock
+            pass
+
+    if not chart_data:
+        chart_data = [0] * 5 # Fallback empty chart
 
     st.line_chart(chart_data, height=150)
 
-# 5. Main Layout
+# 4. Main Layout: Split Screen
 col_left, col_right = st.columns([1, 1])
 
-# --- LEFT COLUMN: INPUTS & ORCHESTRATION ---
+# --- LEFT COLUMN: INTERACTION ---
 with col_left:
-    st.header("Examination Console")
+    st.header("Interaction Console")
 
-    # Audio
-    st.subheader("1. Clinical Dictation")
+    # Inputs
+    st.subheader("Clinical Dictation")
     audio_input = st.audio_input("Record Voice Note")
 
-    # Vision
-    st.subheader("2. Medical Imaging")
+    st.subheader("Medical Imaging")
     uploaded_file = st.file_uploader("Upload X-Ray", type=['png', 'jpg', 'jpeg'])
 
     if uploaded_file:
-        st.image(uploaded_file, use_column_width=True, caption="Preview")
+        st.image(uploaded_file, caption="X-Ray Preview", use_column_width=True)
 
     st.markdown("---")
     run_btn = st.button("🚀 Run Full Triage & Analysis", type="primary", use_container_width=True)
 
-# --- RIGHT COLUMN: OUTPUT ---
+    # Status / Orchestration Visualization
+    status_container = st.empty()
+
+    # Chat Interface (Bottom of Left Column)
+    st.markdown("### 💬 Consultant Chat")
+
+    # Initialize Chat History
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # Display Chat Messages
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Chat Input
+    if prompt := st.chat_input("Ask follow-up questions..."):
+        # Add user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Get Context from Report
+        report_context = ""
+        if "final_report" in st.session_state and st.session_state.final_report:
+             report_context = st.session_state.final_report.get("markdown_report", "")
+
+        # Call Chat Tool
+        with st.chat_message("assistant"):
+            with st.spinner("Consulting..."):
+                try:
+                    # Prepare history as string or list
+                    chat_history = [
+                        {"role": m["role"], "content": m["content"]}
+                        for m in st.session_state.messages
+                    ]
+
+                    response = utils.call_mcp_tool(
+                        "chat_with_consultant",
+                        {
+                            "query": prompt,
+                            "context_context": report_context, # Distinct arg name
+                            "history": json.dumps(chat_history) # Passing as JSON string to be safe
+                        }
+                    )
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                except Exception as e:
+                    st.error(f"Chat Error: {e}")
+
+
+# --- RIGHT COLUMN: CLINICAL ARTIFACT ---
 with col_right:
     # State Management
     if "report_state" not in st.session_state:
-        st.session_state.report_state = "standby" # standby, processing, ready
+        st.session_state.report_state = "standby"
     if "final_report" not in st.session_state:
         st.session_state.final_report = {}
 
+    # Display Logic
     if st.session_state.report_state == "standby":
-        st.info("👋 Ready for consultation. Upload data and click Run.")
-        # Reference Card Placeholder
-        st.markdown("""
-        #### NEWS2 Reference
-        | Score | Risk | Response |
-        |-------|------|----------|
-        | 0-4 | Low | Ward-based response |
-        | 5-6 | Medium | Key threshold for urgent response |
-        | 7+ | High | Emergency response |
-        """)
+        with st.container(border=True):
+             st.markdown("#### Waiting for Triage Data...")
+             st.info("Upload inputs on the left and click Run to generate the SOAP note.")
+             # Static image or table placeholder
+             st.markdown("##### NEWS2 Protocol Reference")
+             st.table({
+                 "Score": ["0-4", "5-6", "7+"],
+                 "Risk": ["Low", "Medium", "High"],
+                 "Response": ["Ward-based", "Urgent Review", "Emergency Call"]
+             })
 
     elif st.session_state.report_state == "processing":
-         with st.status("🤖 MedGemma Agent Working...", expanded=True) as status:
-             st.write("Initializing...")
-             # Logic will happen in the button callback, but UI updates here
-             # if we used a rerun. Since we do logic in the button callback,
-             # this state might be transient or we update the status container directly there.
+        with st.container(border=True):
+             st.spinner("Generating Clinical Artifact...")
+             st.markdown("*Analysis in progress...*")
 
     elif st.session_state.report_state == "ready":
         data = st.session_state.final_report
 
-        # Thoughts
-        with st.expander("🧠 Agent Thoughts (Chain-of-Thought)", expanded=False):
-            st.markdown(data.get("thought", "No thoughts captured."))
+        # Metadata Expander
+        with st.expander("📄 Patient Metadata (OCR)", expanded=False):
+             # Try to find metadata in the gathered results if stored,
+             # or generic info. Since we don't persist the raw metadata in session_state
+             # cleanly in my previous thought, let's fix that in the logic below.
+             if "metadata_result" in st.session_state:
+                 st.code(st.session_state.metadata_result)
+             else:
+                 st.write("No metadata extracted.")
 
-        # Report
+        # Thoughts Visualization
+        if data.get("thought"):
+            with st.expander("🧠 Clinical Reasoning (Chain-of-Thought)", expanded=False):
+                 st.markdown(f"<div class='thought-block'>{data['thought']}</div>", unsafe_allow_html=True)
+
+        # The Paper Record
         with st.container(border=True):
-            st.markdown("### 📋 OFFICIAL SOAP NOTE")
-            st.markdown(data.get("markdown_report", ""))
+            st.markdown("### 📋 SOAP NOTE")
+            st.markdown(data.get("markdown_report", "No report generated."))
 
-            # Download
             st.download_button(
-                "📥 Download Report",
+                "📥 Download Record",
                 data.get("markdown_report", ""),
-                file_name="soap_report.md"
+                file_name="soap_note.md"
             )
 
 
-# --- LOGIC: ORCHESTRATION ---
+# --- ORCHESTRATION LOGIC ---
 if run_btn:
-    # Update State (Visual only, execution is sync here)
     st.session_state.report_state = "processing"
 
-    # We need a placeholder in the right column to show progress LIVE
-    # because the script is running top-to-bottom.
-    # We can write to col_right directly.
+    # We use a status container in the left col to show progress
+    with status_container.status("🚀 AI Agent Orchestrating...", expanded=True) as status:
 
-    with col_right:
-        # Clear previous content
-        st.empty()
+        # 1. Gather Inputs (Parallel)
+        status.write("⚡ Gathering Clinical Data (Audio + Vision)...")
+        try:
+            # Run async gathering
+            # We pass the file objects directly. utils will handle encoding.
+            results = asyncio.run(utils.gather_analysis_inputs(audio_input, uploaded_file))
 
-        with st.status("🤖 MedGemma Orchestration...", expanded=True) as status:
+            audio_transcript = results.get("audio", "")
+            image_analysis = results.get("image_analysis", "")
+            image_metadata = results.get("image_metadata", "")
 
-            # Context Accumulator
-            context_parts = []
+            # Save metadata for display
+            st.session_state.metadata_result = image_metadata
 
-            # Step 1: Vitals (Immediate)
-            status.write("📊 analyzing vitals...")
-            # We already have `triage_result` from sidebar
-            vitals_json = json.dumps(triage_result)
-            context_parts.append(f"VITALS ANALYSIS:\n{vitals_json}")
+            status.write("✅ Data Transcribed & Analyzed.")
+        except Exception as e:
+            st.error(f"Input Processing Failed: {e}")
+            st.stop()
 
-            # Step 2: Audio (Parallel-ish)
-            if audio_input:
-                status.write("👂 Transcribing audio...")
-                try:
-                    b64_audio = utils.encode_to_base64(audio_input)
-                    transcript = tools.call_mcp_tool("transcribe_medical_audio", {"audio_base64": b64_audio})
-                    context_parts.append(f"AUDIO TRANSCRIPT:\n{transcript}")
-                    status.write("✅ Audio transcribed.")
-                except Exception as e:
-                    status.write(f"❌ Audio Error: {e}")
+        # 2. Prepare Context for MedGemma
+        status.write("🔄 Aggregating Context...")
 
-            # Step 3: Vision
-            if uploaded_file:
-                status.write("👁️ Scanning X-Ray (Multi-scale)...")
-                try:
-                    b64_image = utils.encode_to_base64(uploaded_file)
-                    vision_analysis = tools.call_mcp_tool("analyze_xray_multiscale", {"image_base64": b64_image})
+        # Get latest vitals from sidebar variables (they are available in scope)
+        vitals_context = json.dumps(triage_data)
 
-                    # Metadata
-                    status.write("📄 Extracting Metadata...")
-                    meta = tools.call_mcp_tool("extract_xray_metadata", {"image_base64": b64_image})
+        full_context = f"""
+        VITALS DATA (NEWS2):
+        {vitals_context}
 
-                    context_parts.append(f"IMAGE ANALYSIS:\n{vision_analysis}")
-                    context_parts.append(f"IMAGE METADATA:\n{meta}")
-                    status.write("✅ Image analyzed.")
-                except Exception as e:
-                    status.write(f"❌ Vision Error: {e}")
+        AUDIO TRANSCRIPT:
+        {audio_transcript}
 
-            # Step 4: Synthesis & Consult
-            status.write("🧠 Consulting MedGemma (Generating SOAP)...")
-            full_context = "\n\n".join(context_parts)
+        VISUAL FINDINGS:
+        {image_analysis}
 
-            try:
-                # Call consult_medgemma
-                # Note: The tool expects 'query' and 'context_data'
-                response_text = tools.call_mcp_tool(
-                    "consult_medgemma",
-                    {
-                        "query": "Generate a professional SOAP report based on this context.",
-                        "context_data": full_context
-                    }
-                )
+        EXTRACTED METADATA:
+        {image_metadata}
+        """
 
-                # Step 5: Save History
-                status.write("💾 Saving Record...")
-                tools.call_mcp_tool("manage_patient_history", {"action": "save", "content": response_text})
-                
-                # Parse
-                parsed = utils.parse_medgemma_response(response_text)
-                st.session_state.final_report = parsed
-                st.session_state.report_state = "ready"
-                
-                status.update(label="✅ Complete", state="complete", expanded=False)
-                
-            except Exception as e:
-                status.update(label="❌ Analysis Failed", state="error")
-                st.error(f"MedGemma Error: {e}")
-                
-    # Rerun to show the "ready" state in the main flow
+        # 3. Consult MedGemma
+        status.write("🧠 Consulting MedGemma Specialist...")
+        try:
+            report_raw = utils.call_mcp_tool(
+                "consult_medgemma",
+                {
+                    "query": "Generate a full clinical SOAP note based on this patient data.",
+                    "context_data": full_context
+                }
+            )
+
+            # Parse response
+            parsed_report = utils.parse_medgemma_response(report_raw)
+            st.session_state.final_report = parsed_report
+            st.session_state.report_state = "ready"
+
+            status.update(label="✅ Analysis Complete", state="complete", expanded=False)
+
+        except Exception as e:
+            status.update(label="❌ Consultation Failed", state="error")
+            st.error(f"Error: {e}")
+
+    # Rerun to update the Right Column UI
     st.rerun()
