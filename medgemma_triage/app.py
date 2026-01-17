@@ -22,14 +22,14 @@ st.set_page_config(
 st.markdown("""
     <style>
     .reportview-container {
-        background: #f0f2f6;
+        background: #F5F7F8;
     }
     .main-header {
         font-family: 'Helvetica Neue', sans-serif;
-        color: #2c3e50;
+        color: #37474F;
     }
     .stApp {
-        background-color: #FFFFFF;
+        background-color: #F5F7F8;
     }
     .triage-card {
         padding: 20px;
@@ -42,7 +42,7 @@ st.markdown("""
     .stable { background-color: #27ae60; }
 
     div.stButton > button:first-child {
-        background-color: #008080;
+        background-color: #00796B;
         color: white;
     }
     </style>
@@ -85,6 +85,8 @@ with st.sidebar:
         with st.spinner("Fetching tools..."):
             tool_list = tools.list_tools()
             st.json(tool_list)
+
+    show_history = st.toggle("Show Patient History", value=False)
 
     if st.button("Reset Session"):
         st.session_state.messages = []
@@ -233,7 +235,7 @@ def call_model(messages):
             model="google/medgemma-27b-it",
             messages=messages,
             temperature=temperature,
-            max_tokens=2048
+            max_tokens=4096
         )
         return response.choices[0].message.content
     except Exception as e:
