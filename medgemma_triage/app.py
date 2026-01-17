@@ -170,29 +170,38 @@ with col_left:
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Get Context from Report
+        # Get Context from Report for System Message
         report_context = ""
         if "final_report" in st.session_state and st.session_state.final_report:
              report_context = st.session_state.final_report.get("markdown_report", "")
+
+        # Build Message List for SGLang (System + History)
+        # Note: History includes the user's latest prompt already
+
+        full_messages = []
+        # 1. System Context
+        if report_context:
+            full_messages.append({
+                "role": "system",
+                "content": f"You are a helpful medical consultant. Here is the current patient report context:\n{report_context}"
+            })
+        else:
+             full_messages.append({
+                "role": "system",
+                "content": "You are a helpful medical consultant."
+            })
+
+        # 2. History (which includes the new User prompt)
+        for m in st.session_state.messages:
+            full_messages.append({"role": m["role"], "content": m["content"]})
 
         # Call Chat Tool
         with st.chat_message("assistant"):
             with st.spinner("Consulting..."):
                 try:
-                    # Prepare history as string or list
-                    chat_history = [
-                        {"role": m["role"], "content": m["content"]}
-                        for m in st.session_state.messages
-                    ]
+                    # Use the SGLang-compatible wrapper
+                    response = utils.run_chat(messages=full_messages)
 
-                    response = utils.call_mcp_tool(
-                        "chat_with_consultant",
-                        {
-                            "query": prompt,
-                            "context_context": report_context, # Distinct arg name
-                            "history": json.dumps(chat_history) # Passing as JSON string to be safe
-                        }
-                    )
                     st.markdown(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
                 except Exception as e:
