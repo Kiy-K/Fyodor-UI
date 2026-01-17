@@ -192,11 +192,7 @@ def run_agent_loop(
         if has_audio:
             system_content += "\n- Clinical voice note is available. Use `transcribe_medical_audio` (no arguments needed)."
     
-    messages = [{"role": "system", "content": system_content}]
-    
-    # Append History
-    for msg in chat_history:
-        messages.append(msg)
+    messages = [{"role": "system", "content": system_content}] + chat_history
 
     # Append Current User Input
     messages.append({"role": "user", "content": user_input})
