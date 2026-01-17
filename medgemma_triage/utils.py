@@ -3,8 +3,8 @@ import json
 import httpx
 import base64
 import asyncio
-from typing import Generator, Tuple, Dict, Any, List
-from openai import OpenAI
+from typing import AsyncGenerator, Tuple, Dict, Any, List
+from openai import AsyncOpenAI
 import streamlit as st
 
 # --- Configuration ---
@@ -120,9 +120,10 @@ def encode_to_base64(file_obj) -> str:
     except Exception as e:
         return None
 
-def call_fastmcp_tool(tool_name: str, args: dict) -> str:
+async def call_fastmcp_tool_async(tool_name: str, args: dict, client: httpx.AsyncClient) -> str:
     """
-    Synchronously calls the FastMCP Cloud endpoint via HTTP POST.
+    Asynchronously calls the FastMCP Cloud endpoint via HTTP POST.
+    Uses the provided shared client to avoid repeated initialization.
     """
     payload = {
         "name": tool_name,
@@ -130,30 +131,28 @@ def call_fastmcp_tool(tool_name: str, args: dict) -> str:
     }
 
     try:
-        # Using a timeout of 60s for potentially long running tools
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(MCP_TOOL_ENDPOINT, json=payload)
-            response.raise_for_status()
+        response = await client.post(MCP_TOOL_ENDPOINT, json=payload)
+        response.raise_for_status()
 
-            # Parse MCP JSON-RPC Response
-            resp_data = response.json()
+        # Parse MCP JSON-RPC Response
+        resp_data = response.json()
 
-            if resp_data.get("isError"):
-                content = resp_data.get("content", [])
-                error_msg = "Unknown Error"
-                if content and isinstance(content, list) and len(content) > 0:
-                     error_msg = content[0].get("text", str(content))
-                raise Exception(f"FastMCP Tool Error: {error_msg}")
-
+        if resp_data.get("isError"):
             content = resp_data.get("content", [])
-            if not content or not isinstance(content, list):
-                return ""
+            error_msg = "Unknown Error"
+            if content and isinstance(content, list) and len(content) > 0:
+                    error_msg = content[0].get("text", str(content))
+            raise Exception(f"FastMCP Tool Error: {error_msg}")
 
-            # Return text from the first content block
-            first_block = content[0]
-            if first_block.get("type") == "text":
-                return first_block.get("text", "")
-            return str(first_block)
+        content = resp_data.get("content", [])
+        if not content or not isinstance(content, list):
+            return ""
+
+        # Return text from the first content block
+        first_block = content[0]
+        if first_block.get("type") == "text":
+            return first_block.get("text", "")
+        return str(first_block)
 
     except httpx.HTTPStatusError as e:
         return f"Error calling {tool_name}: {e.response.text}"
@@ -162,18 +161,18 @@ def call_fastmcp_tool(tool_name: str, args: dict) -> str:
 
 # --- The Agent Loop ---
 
-def run_agent_loop(
+async def run_agent_loop_async(
     user_input: str,
     context_files: Dict[str, Any],
     chat_history: List[Dict[str, str]]
-) -> Generator[Tuple[str, str], None, None]:
+) -> AsyncGenerator[Tuple[str, str], None]:
     """
     Manages the conversation loop with SGLang and FastMCP.
     Yields tuples of (status_type, content) to update the UI.
     """
 
-    # 1. Initialize OpenAI Client for SGLang
-    client = OpenAI(
+    # 1. Initialize Async OpenAI Client for SGLang
+    client_openai = AsyncOpenAI(
         base_url=MEDGEMMA_API_URL,
         api_key=MEDGEMMA_API_KEY
     )
@@ -204,66 +203,69 @@ def run_agent_loop(
     # Yield initial status
     yield ("status", "Consulting MedGemma...")
 
-    # 3. The Tool Loop
-    while True:
-        try:
-            # Call Model
-            completion = client.chat.completions.create(
-                model="medgemma", # Model name usually ignored by SGLang if only one is served, but good practice
-                messages=messages,
-                tools=TOOLS_SCHEMA,
-                tool_choice="auto"
-            )
+    # Initialize shared HTTP client for tool calls
+    async with httpx.AsyncClient(timeout=60.0) as http_client:
 
-            message = completion.choices[0].message
+        # 3. The Tool Loop
+        while True:
+            try:
+                # Call Model
+                completion = await client_openai.chat.completions.create(
+                    model="medgemma", # Model name usually ignored by SGLang if only one is served, but good practice
+                    messages=messages,
+                    tools=TOOLS_SCHEMA,
+                    tool_choice="auto"
+                )
 
-            # Check if the model wants to call a tool
-            if message.tool_calls:
-                # Add the assistant's "thought" (tool call request) to history
-                messages.append(message)
+                message = completion.choices[0].message
 
-                for tool_call in message.tool_calls:
-                    fn_name = tool_call.function.name
-                    args_str = tool_call.function.arguments
-                    args = json.loads(args_str) if args_str else {}
+                # Check if the model wants to call a tool
+                if message.tool_calls:
+                    # Add the assistant's "thought" (tool call request) to history
+                    messages.append(message)
 
-                    yield ("tool", f"Running Tool: {fn_name}...")
+                    for tool_call in message.tool_calls:
+                        fn_name = tool_call.function.name
+                        args_str = tool_call.function.arguments
+                        args = json.loads(args_str) if args_str else {}
 
-                    # --- CONTEXT INJECTION ---
-                    # The model sends empty args, we inject the heavy Base64 data here.
-                    if fn_name == "analyze_xray_multiscale" or fn_name == "extract_xray_metadata":
-                        if has_image:
-                            b64_img = encode_to_base64(context_files["image"])
-                            args["image_base64"] = b64_img
-                        else:
-                            # If model hallucinates availability or we failed to load
-                            pass
+                        yield ("tool", f"Running Tool: {fn_name}...")
 
-                    elif fn_name == "transcribe_medical_audio":
-                        if has_audio:
-                            b64_audio = encode_to_base64(context_files["audio"])
-                            args["audio_base64"] = b64_audio
-                        else:
-                            pass
+                        # --- CONTEXT INJECTION ---
+                        # The model sends empty args, we inject the heavy Base64 data here.
+                        if fn_name == "analyze_xray_multiscale" or fn_name == "extract_xray_metadata":
+                            if has_image:
+                                b64_img = encode_to_base64(context_files["image"])
+                                args["image_base64"] = b64_img
+                            else:
+                                # If model hallucinates availability or we failed to load
+                                pass
 
-                    # Execute Tool
-                    result = call_fastmcp_tool(fn_name, args)
+                        elif fn_name == "transcribe_medical_audio":
+                            if has_audio:
+                                b64_audio = encode_to_base64(context_files["audio"])
+                                args["audio_base64"] = b64_audio
+                            else:
+                                pass
 
-                    # Add result to history
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": result
-                    })
+                        # Execute Tool
+                        result = await call_fastmcp_tool_async(fn_name, args, http_client)
 
-                    yield ("tool_result", f"Finished {fn_name}")
+                        # Add result to history
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": result
+                        })
 
-            else:
-                # No tool calls, this is the final answer
-                final_content = message.content
-                yield ("content", final_content)
+                        yield ("tool_result", f"Finished {fn_name}")
+
+                else:
+                    # No tool calls, this is the final answer
+                    final_content = message.content
+                    yield ("content", final_content)
+                    break
+
+            except Exception as e:
+                yield ("error", f"Agent Loop Error: {str(e)}")
                 break
-
-        except Exception as e:
-            yield ("error", f"Agent Loop Error: {str(e)}")
-            break
