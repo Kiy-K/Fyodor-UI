@@ -31,13 +31,35 @@ def setup_styles():
             background-color: #00796B;
             color: white;
         }
+
+        /* Sticky Footer Styles */
+        /* Add padding to the bottom of the main block so messages aren't hidden */
+        .block-container {
+            padding-bottom: 150px;
+        }
+        /* Style the fixed bottom container */
+        .fixed-bottom {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background-color: #F5F7F8; /* Matches app background or white */
+            border-top: 1px solid #ddd;
+            padding: 1rem 1rem 2rem 1rem;
+            z-index: 999;
+        }
+        /* Hide the default Streamlit footer */
+        footer {visibility: hidden;}
+
         </style>
     """, unsafe_allow_html=True)
 
 def render_clean_response(parsed_response):
     """
     Renders the parsed response:
-    1. Thought in an expander.
+    1. Thought in an expander (optional, based on requirement to show only final assessment).
+       - User requirement: "Strip out... show ONLY the final medical assessment, not the internal reasoning log."
+       - Implication: Do NOT show the thought expander.
     2. Content as main text.
     3. Triage card if JSON data exists.
     """
@@ -46,10 +68,10 @@ def render_clean_response(parsed_response):
     data = parsed_response.get("data")
     is_json = parsed_response.get("is_json")
 
-    # 1. Thought Process
-    if thought:
-        with st.expander("🧠 Quá trình suy luận lâm sàng (Clinical Reasoning)"):
-            st.markdown(thought)
+    # 1. Thought Process - HIDDEN per requirement
+    # if thought:
+    #     with st.expander("🧠 Clinical Reasoning"):
+    #         st.markdown(thought)
 
     # 2. Main Content
     if content:
@@ -81,6 +103,5 @@ def render_clean_response(parsed_response):
             for action in actions:
                 st.markdown(f"- {action}")
     elif not is_json and not content and not thought:
-        # Fallback if everything is empty or parsing failed completely but we have raw data
-        # Actually utils returns empty dicts if failed.
+        # Fallback if everything is empty
         pass
