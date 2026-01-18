@@ -2,6 +2,7 @@ import streamlit as st
 import os
 import time
 import base64
+import hashlib
 from openai import OpenAI
 from dotenv import load_dotenv
 import utils
@@ -87,8 +88,8 @@ if "user_draft" not in st.session_state:
     st.session_state.user_draft = ""
 if "last_processed_audio" not in st.session_state:
     st.session_state.last_processed_audio = None
-if "last_audio_id" not in st.session_state:
-    st.session_state.last_audio_id = None
+if "last_audio_hash" not in st.session_state:
+    st.session_state.last_audio_hash = None
 
 # 3. Main Interface
 st.markdown("<h1 class='main-header'>🏥 MedGemma Triage System</h1>", unsafe_allow_html=True)
@@ -213,7 +214,11 @@ def run_triage_engine(user_text, image_obj=None):
             # ensure that when this is rendered from history, it is also clean.
             # But render_clean_response handles that.
             # We append the full raw response to history so the model has context for next turn.
-            st.session_state.messages.append({"role": "assistant", "content": final_response_text})
+            # st.session_state.messages.append({"role": "assistant", "content": final_response_text})
+
+            # Correction based on review: strip think tags before storing to ensure history is clean.
+            cleaned_text_for_history = utils.strip_think_tags(final_response_text)
+            st.session_state.messages.append({"role": "assistant", "content": cleaned_text_for_history})
 
         except Exception as e:
             st.error(f"An unexpected error occurred: {e}")
@@ -234,25 +239,36 @@ with st.container():
         # TEXT INPUT (Populated by Audio or Manual Typing)
         # Logic: If audio_val changes, update session_state.user_draft
         if audio_val:
-            # Transcribe only if it's new audio
-            if st.session_state.get("last_audio_id") != audio_val.id:
-                try:
-                    # Read bytes from audio value
-                    audio_bytes = audio_val.read()
+            # Create a hash of the audio bytes to serve as a unique ID
+            # audio_val is a BytesIO object or bytes? st.audio_input returns UploadedFile which acts like file
+            # Wait, st.audio_input returns an UploadedFile object which extends BytesIO.
+            # We can read it.
+            # But the user snippet says: "Create a hash of the audio bytes"
+            # And "audio_val" in snippet seems to be treated as bytes in `md5(audio_val)`.
+            # But st.audio_input returns a file-like object.
+            # We need to read it first.
+
+            # Let's read it safely.
+            audio_bytes = audio_val.getvalue()
+
+            audio_hash = hashlib.md5(audio_bytes).hexdigest()
+
+            # Check if this is new audio
+            if st.session_state.get("last_audio_hash") != audio_hash:
+                with st.spinner("Processing audio..."):
+                    # Update state immediately to prevent re-runs
+                    st.session_state.last_audio_hash = audio_hash
+
+                    # Call transcription
                     transcribed_text = tools.transcribe_audio(audio_bytes)
 
-                    # Append to existing draft or replace? Usually replace or append.
-                    # Let's append if there is existing text, or just replace?
-                    # "Populated by Audio" usually implies filling it.
-                    # But if user typed something, we don't want to lose it.
+                    # Update draft
                     if st.session_state.user_draft:
                         st.session_state.user_draft += f" {transcribed_text}"
                     else:
                         st.session_state.user_draft = transcribed_text
 
-                    st.session_state.last_audio_id = audio_val.id
-                except Exception as e:
-                    st.error(f"Audio Error: {e}")
+                    st.rerun() # Force refresh to show text in the input box
 
         # The Text Area acts as the main input
         # Note: 'key' is crucial for state syncing. We use a separate key for the widget
