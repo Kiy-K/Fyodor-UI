@@ -8,6 +8,7 @@ import utils
 import tools
 import prompts
 import ui
+from utils import get_secret
 
 # 1. Configuration & Setup
 load_dotenv()
@@ -31,21 +32,21 @@ with st.sidebar:
     st.subheader("System Status")
 
     # Check Modal Config (Brain)
-    modal_url = os.getenv("MODAL_API_URL")
+    modal_url = get_secret("MODAL_API_URL")
     if modal_url:
         st.success(f"Brain: Connected (Modal)")
     else:
         st.error("Brain: Missing Configuration")
 
-    # Check Modal ASR Config (Ear)
-    modal_asr_url = os.getenv("MODAL_ASR_URL")
-    if modal_asr_url:
-        st.success(f"Ear: Connected (Modal)")
+    # Check Groq ASR Config (Ear)
+    groq_api_key = get_secret("GROQ_API_KEY")
+    if groq_api_key:
+        st.success(f"Ear: Connected (Groq Whisper)")
     else:
         st.error("Ear: Missing Configuration")
 
     # Check MCP Config
-    mcp_url = os.getenv("MCP_SERVER_URL")
+    mcp_url = get_secret("MCP_SERVER_URL")
     if mcp_url:
         st.success(f"MCP: {mcp_url}")
     else:
@@ -109,8 +110,8 @@ for msg in st.session_state.messages:
 def call_model(messages):
     """Calls the remote model via OpenAI client."""
     client = OpenAI(
-        base_url=os.getenv("MODAL_API_URL"),
-        api_key=os.getenv("MODAL_API_KEY", "dummy")
+        base_url=get_secret("MODAL_API_URL"),
+        api_key=get_secret("MODAL_API_KEY", "dummy")
     )
     try:
         response = client.chat.completions.create(
@@ -225,7 +226,7 @@ st.subheader("🎤 Live Voice Triage")
 # Audio Inputs
 col1, col2 = st.columns([1, 4])
 with col1:
-    audio_value = st.audio_input("🎤 Speak Symptoms (MedASR Optimized)")
+    audio_value = st.audio_input("🎤 Speak Symptoms (Groq Whisper Optimized)")
 
 # Logic to handle new audio inputs (Live or Uploaded)
 new_audio_bytes = None
