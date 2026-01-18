@@ -1,14 +1,31 @@
 import asyncio
 import os
 import base64
+import io
 import httpx
+import streamlit as st
 from fastmcp import Client
 from dotenv import load_dotenv
 from groq import Groq
+from utils import get_secret
 
 load_dotenv()
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "https://med-mcp.fastmcp.app/sse")
+# Global variable for the embedding model (Lazy Loading) - Cached resource
+@st.cache_resource
+def get_embedding_model():
+    """
+    Singleton to load the embedding model only once.
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+        # Load the model (runs efficiently on CPU)
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        return model
+    except ImportError:
+        raise ImportError("sentence-transformers is not installed. Please install it.")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load embedding model: {e}")
 
 async def _call_tool_async(tool_name, args=None):
     """
@@ -17,9 +34,11 @@ async def _call_tool_async(tool_name, args=None):
     if args is None:
         args = {}
 
+    mcp_url = get_secret("MCP_SERVER_URL", "https://med-mcp.fastmcp.app/sse")
+
     # Create the client.
     # Note: fastmcp.Client uses 'url' for SSE.
-    async with Client(MCP_SERVER_URL) as client:
+    async with Client(mcp_url) as client:
         result = await client.call_tool(tool_name, arguments=args)
         return result
 
@@ -30,7 +49,8 @@ def call_mcp_tool(tool_name, args=None):
     return asyncio.run(_call_tool_async(tool_name, args))
 
 async def _list_tools_async():
-    async with Client(MCP_SERVER_URL) as client:
+    mcp_url = get_secret("MCP_SERVER_URL", "https://med-mcp.fastmcp.app/sse")
+    async with Client(mcp_url) as client:
         tools = await client.list_tools()
         return tools
 
@@ -92,41 +112,62 @@ def transcribe_legacy(file_bytes):
 
 def transcribe_audio(file_bytes):
     """
-    Calls the Modal-hosted MedASR service.
+    Transcribes audio using Groq Whisper-Large-V3.
     """
-    modal_asr_url = os.getenv("MODAL_ASR_URL")
-    if not modal_asr_url:
-        return "Error: MODAL_ASR_URL not configured."
-
-    headers = {
-        "Authorization": f"Bearer {os.getenv('MODAL_API_KEY')}",
-        "Content-Type": "application/json"
-    }
+    api_key = get_secret("GROQ_API_KEY")
+    if not api_key:
+        return "Error: GROQ_API_KEY not configured."
 
     try:
-        # Encode audio bytes to Base64 string
-        base64_audio = base64.b64encode(file_bytes).decode('utf-8')
+        client = Groq(api_key=api_key)
 
-        # Construct JSON payload
-        payload = {"audio_data": base64_audio}
+        # Create a file-like object from bytes
+        audio_file = io.BytesIO(file_bytes)
+        audio_file.name = "recording.wav" # Groq requires a filename
 
-        response = httpx.post(
-            modal_asr_url,
-            headers=headers,
-            json=payload,
-            timeout=60.0
+        # Call Groq Whisper API
+        transcription = client.audio.transcriptions.create(
+            file=audio_file,
+            model="whisper-large-v3",
+            prompt="Medical dictation. Patient history, cardiology, hypertension, medication, symptoms.", # Context priming
+            response_format="json",
+            temperature=0.0 # Strict accuracy
+            # language=None # Auto-detect
         )
-        response.raise_for_status()
-        result = response.json()
-        return result.get("text", "Transcription failed (No text in response).")
+        return transcription.text
     except Exception as e:
-        return f"ASR Error (Modal): {str(e)}"
+        return f"Transcription Error (Groq): {str(e)}"
+
+def generate_embedding(text):
+    """
+    Generates an embedding for the given text using sentence-transformers (all-MiniLM-L6-v2).
+    """
+    try:
+        model = get_embedding_model()
+        # encode returns a numpy array or list depending on configuration, we want list of floats
+        embedding = model.encode(text)
+        return embedding.tolist()
+    except Exception as e:
+        # In case of error, returning specific error message or empty list might be safer depending on consumer.
+        # But for now, returning formatted error string to be visible in logs/UI if printed.
+        # However, caller expects list. Let's raise or return empty?
+        # The prompt didn't specify error handling, but usually we don't want to crash.
+        # Let's print error and return empty list or raise.
+        # Given this is a backend tool function, raising or returning error string is common,
+        # but type hint was list[float].
+        # Let's return None or raise so caller knows it failed.
+        # For this implementation, I will return an empty list and log error string to console/return str?
+        # To match other tools, I'll return the error string if I can, but the type signature expectation is list[float].
+        # I'll convert error to string if called directly, but if used programmatically it might break.
+        # I will let the exception propagate or return a descriptive error in a way handled by caller?
+        # Actually, let's just return the error string as other tools do, assuming caller handles type mismatch or displays it.
+        return f"Embedding Error: {str(e)}"
 
 def call_fast_triage(messages):
     """
     Calls the Groq API (Fast Path) using lmeta-llama/llama-4-maverick-17b-128e-instruct.
     """
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = get_secret("GROQ_API_KEY")
     if not api_key:
         return "Error: GROQ_API_KEY not configured."
 

@@ -1,5 +1,28 @@
 import re
 import json
+import os
+import streamlit as st
+
+def get_secret(key, default=None):
+    """
+    Retrieves a secret from Streamlit secrets (priority) or environment variables.
+
+    Args:
+        key (str): The name of the secret/environment variable.
+        default (any): The default value if not found.
+
+    Returns:
+        str or None: The secret value.
+    """
+    try:
+        # st.secrets acts like a dictionary
+        if key in st.secrets:
+            return st.secrets[key]
+    except (FileNotFoundError, AttributeError):
+        # st.secrets might fail if not running in Streamlit or no secrets.toml
+        pass
+
+    return os.getenv(key, default)
 
 def extract_search_command(text):
     """
