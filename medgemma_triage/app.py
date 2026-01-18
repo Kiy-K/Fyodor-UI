@@ -20,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Professional Medical Look
+# Custom CSS for Professional Medical Look & Sticky Footer
 ui.setup_styles()
 
 # 2. Sidebar & State
@@ -73,7 +73,7 @@ with st.sidebar:
 
     if st.button("Reset Session"):
         st.session_state.messages = []
-        st.session_state.draft_text = ""
+        st.session_state.user_draft = ""
         st.rerun()
 
     with st.sidebar.expander("📤 Legacy Upload"):
@@ -83,10 +83,12 @@ with st.sidebar:
 # Initialize State
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "draft_text" not in st.session_state:
-    st.session_state.draft_text = ""
+if "user_draft" not in st.session_state:
+    st.session_state.user_draft = ""
 if "last_processed_audio" not in st.session_state:
     st.session_state.last_processed_audio = None
+if "last_audio_id" not in st.session_state:
+    st.session_state.last_audio_id = None
 
 # 3. Main Interface
 st.markdown("<h1 class='main-header'>🏥 MedGemma Triage System</h1>", unsafe_allow_html=True)
@@ -204,82 +206,80 @@ def run_triage_engine(user_text, image_obj=None):
             # Use UI helper to render
             ui.render_clean_response(parsed)
 
-            # If parsing failed completely (no content, no thought, no data) but we have text, show raw
-            if not parsed["content"] and not parsed["thought"] and not parsed["is_json"]:
-                 # This happens if everything was stripped or empty, but let's check final_response_text
-                 if final_response_text:
-                     # This shouldn't happen with our parser unless it's weird.
-                     # But just in case, show raw.
-                     st.warning("Raw Output:")
-                     st.markdown(final_response_text)
-
+            # Store ONLY the clean content (stripped of thoughts) or the full raw?
+            # Usually we store what we showed or the raw response.
+            # Storing raw allows context to be preserved, but for display we want clean.
+            # Given the strict requirement "Show ONLY final assessment", we should probably
+            # ensure that when this is rendered from history, it is also clean.
+            # But render_clean_response handles that.
+            # We append the full raw response to history so the model has context for next turn.
             st.session_state.messages.append({"role": "assistant", "content": final_response_text})
 
         except Exception as e:
             st.error(f"An unexpected error occurred: {e}")
 
+# --- FLOATING INPUT BAR ---
+# Logic: Place this code at the VERY END of your script (after displaying chat history)
+with st.container():
+    # This container simulates the sticky footer
+    st.markdown('<div class="fixed-bottom">', unsafe_allow_html=True)
 
-# 5. Live Audio & Legacy Upload Handling
-st.markdown("---")
-st.subheader("🎤 Live Voice Triage")
+    col1, col2, col3 = st.columns([1, 4, 1])
 
-# Audio Inputs
-col1, col2 = st.columns([1, 4])
-with col1:
-    audio_value = st.audio_input("🎤 Speak Symptoms (Groq Whisper Optimized)")
+    with col1:
+        # AUDIO INPUT (Compact)
+        audio_val = st.audio_input("Record", label_visibility="collapsed")
 
-# Logic to handle new audio inputs (Live or Uploaded)
-new_audio_bytes = None
-source_name = ""
+    with col2:
+        # TEXT INPUT (Populated by Audio or Manual Typing)
+        # Logic: If audio_val changes, update session_state.user_draft
+        if audio_val:
+            # Transcribe only if it's new audio
+            if st.session_state.get("last_audio_id") != audio_val.id:
+                try:
+                    # Read bytes from audio value
+                    audio_bytes = audio_val.read()
+                    transcribed_text = tools.transcribe_audio(audio_bytes)
 
-# Prioritize Live Audio if present, then Sidebar Upload
-if audio_value:
-    new_audio_bytes = audio_value.read()
-    source_name = "Live Recording"
-elif uploaded_audio:
-    uploaded_audio.seek(0)
-    new_audio_bytes = uploaded_audio.read()
-    source_name = "Uploaded File"
+                    # Append to existing draft or replace? Usually replace or append.
+                    # Let's append if there is existing text, or just replace?
+                    # "Populated by Audio" usually implies filling it.
+                    # But if user typed something, we don't want to lose it.
+                    if st.session_state.user_draft:
+                        st.session_state.user_draft += f" {transcribed_text}"
+                    else:
+                        st.session_state.user_draft = transcribed_text
 
-# Check if we need to transcribe (only if audio changed)
-if new_audio_bytes:
-    # Hash check to avoid re-transcribing same audio on every rerun
-    current_hash = hash(new_audio_bytes)
-    if st.session_state.last_processed_audio != current_hash:
-        with st.status(f"👂 Converting speech to medical text ({source_name})...") as status:
-            transcription = tools.transcribe_audio(new_audio_bytes)
+                    st.session_state.last_audio_id = audio_val.id
+                except Exception as e:
+                    st.error(f"Audio Error: {e}")
 
-            # Update Draft
-            if st.session_state.draft_text:
-                 st.session_state.draft_text += f"\n\n[TRANSCRIPTION: {transcription}]"
-            else:
-                 st.session_state.draft_text = f"[TRANSCRIPTION: {transcription}]"
+        # The Text Area acts as the main input
+        # Note: 'key' is crucial for state syncing. We use a separate key for the widget
+        # and sync it to user_draft manually if needed, or just rely on the key being same as session state variable?
+        # Streamlit allows key="user_draft" to bind directly to st.session_state.user_draft.
+        # This is the cleanest way.
+        user_input = st.text_area(
+            "Message MedGemma...",
+            value=st.session_state.user_draft,
+            height=68, # Minimal height
+            label_visibility="collapsed",
+            key="chat_box_input" # Using a distinct key to avoid conflicts if we manipulate state manually above
+        )
 
-            st.session_state.last_processed_audio = current_hash
-            status.write("Done!")
-            st.rerun()
+        # Sync back to state if user types manually
+        if user_input != st.session_state.user_draft:
+             st.session_state.user_draft = user_input
 
-# Draft Area
-draft = st.text_area("📝 Review Transcription / Draft Notes",
-                     value=st.session_state.draft_text,
-                     height=150,
-                     key="draft_input")
+    with col3:
+        # SEND BUTTON
+        if st.button("🚀 Send", use_container_width=True, type="primary"):
+            if st.session_state.user_draft.strip():
+                # Trigger the standard "Send Message" logic here
+                run_triage_engine(st.session_state.user_draft, uploaded_image)
+                # Clear input
+                st.session_state.user_draft = ""
+                st.rerun()
 
-# Sync text area changes back to session state
-if draft != st.session_state.draft_text:
-    st.session_state.draft_text = draft
+    st.markdown('</div>', unsafe_allow_html=True)
 
-if st.button("🚀 Send to MedGemma", type="primary"):
-    if st.session_state.draft_text.strip():
-        # Execute Triage
-        run_triage_engine(st.session_state.draft_text, uploaded_image)
-        # Clear Draft
-        st.session_state.draft_text = ""
-        st.rerun()
-    else:
-        st.warning("Please record audio or type notes first.")
-
-# Standard Chat Input (Bottom)
-chat_input_val = st.chat_input("Or type a quick message here...")
-if chat_input_val:
-    run_triage_engine(chat_input_val, uploaded_image)
