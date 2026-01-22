@@ -1,301 +1,189 @@
-import streamlit as st
 import os
-import time
-import base64
-import hashlib
-from openai import OpenAI
-from dotenv import load_dotenv
-import utils
-import tools
-import prompts
-import ui
-from utils import get_secret
+import sys
 
-# 1. Configuration & Setup
-load_dotenv()
+# Add the project root to the Python path
+# This is necessary to resolve relative imports when running the app directly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import streamlit as st
+from medgemma_triage import auth
+from medgemma_triage import ui
+
+# --- Page Configuration ---
 st.set_page_config(
-    page_title="MedGemma Triage Pro",
+    page_title="MCP Doctor Dashboard",
     page_icon="🩺",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Professional Medical Look & Sticky Footer
+# --- Styling ---
 ui.setup_styles()
 
-# 2. Sidebar & State
-with st.sidebar:
-    st.image("https://img.icons8.com/color/96/caduceus.png", width=80)
-    st.title("MedGemma Pro")
-    st.markdown("---")
+# --- Authentication Gatekeeper ---
+auth.seed_admin_user() # Ensure the admin user exists for the demo
 
-    st.subheader("System Status")
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
 
-    # Check Modal Config (Brain)
-    modal_url = get_secret("MODAL_API_URL")
-    if modal_url:
-        st.success(f"Brain: Connected (Modal)")
-    else:
-        st.error("Brain: Missing Configuration")
+if not st.session_state.authenticated:
+    # --- Login Form ---
+    st.title("👨‍⚕️ MCP Doctor Dashboard Login")
 
-    # Check Groq ASR Config (Ear)
-    groq_api_key = get_secret("GROQ_API_KEY")
-    if groq_api_key:
-        st.success(f"Ear: Connected (Groq Whisper)")
-    else:
-        st.error("Ear: Missing Configuration")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
 
-    # Check MCP Config
-    mcp_url = get_secret("MCP_SERVER_URL")
-    if mcp_url:
-        st.success(f"MCP: {mcp_url}")
-    else:
-        st.warning("MCP: Not Configured")
-
-    st.markdown("---")
-    st.subheader("Triage Engine")
-    engine_choice = st.radio(
-        "Select Model",
-        ["Expert (Modal 27B)", "Fast (Groq 70B)"],
-        index=0
-    )
-
-    st.markdown("---")
-    st.subheader("Model Settings")
-    temperature = st.slider("Temperature", 0.0, 1.0, 0.2)
-
-    if st.button("List Available Tools"):
-        with st.spinner("Fetching tools..."):
-            tool_list = tools.list_tools()
-            st.json(tool_list)
-
-    show_history = st.toggle("Show Patient History", value=False)
-
-    if st.button("Reset Session"):
-        st.session_state.messages = []
-        st.session_state.user_draft = ""
-        st.rerun()
-
-    with st.sidebar.expander("📤 Legacy Upload"):
-        uploaded_image = st.file_uploader("Upload Medical Image (X-ray, MRI, etc.)", type=['jpg', 'jpeg', 'png'])
-        uploaded_audio = st.file_uploader("Upload Medical Recording (Patient voice, doctor notes)", type=['wav', 'mp3', 'm4a'])
-
-# Initialize State
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "user_draft" not in st.session_state:
-    st.session_state.user_draft = ""
-if "last_processed_audio" not in st.session_state:
-    st.session_state.last_processed_audio = None
-if "last_audio_hash" not in st.session_state:
-    st.session_state.last_audio_hash = None
-
-# 3. Main Interface
-st.markdown("<h1 class='main-header'>🏥 MedGemma Triage System</h1>", unsafe_allow_html=True)
-st.caption("AI-Powered Clinical Decision Support • v2.0 (Modal + FastMCP)")
-
-# Display Chat History
-for msg in st.session_state.messages:
-    if msg["role"] != "system":
-        with st.chat_message(msg["role"]):
-            if isinstance(msg["content"], str):
-                st.markdown(msg["content"])
-            elif isinstance(msg["content"], list):
-                for item in msg["content"]:
-                    if item["type"] == "text":
-                        st.markdown(item["text"])
-                    elif item["type"] == "image_url":
-                        st.image(item["image_url"]["url"])
+        if submitted:
+            if auth.verify_user(username, password):
+                st.session_state.authenticated = True
+                st.session_state.username = username
+                st.rerun()
             else:
-                st.write(msg["content"])
+                st.error("Invalid username or password.")
 
-def call_model(messages):
-    """Calls the remote model via OpenAI client."""
-    client = OpenAI(
-        base_url=get_secret("MODAL_API_URL"),
-        api_key=get_secret("MODAL_API_KEY", "dummy")
-    )
+    st.stop() # --- IMPORTANT: Stop execution if not authenticated ---
+
+# --- Main Dashboard Application ---
+# This code runs ONLY if st.session_state.authenticated is True
+
+from medgemma_triage import mcp_client
+from medgemma_triage import utils
+from groq import Groq
+
+def run_consultation(patient_id, notes, files):
+    """Orchestrates the entire consultation process, including the agentic workflow."""
+
+    with st.spinner("Compiling patient data..."):
+        history = mcp_client.call_backend_tool("get_patient_history", {"patient_id": patient_id}) or "No patient history found."
+        doc_texts, image_files = utils.process_uploaded_files(files)
+
+        initial_prompt = f"""
+        **Patient ID:** {patient_id}
+        **Physician's Notes:** {notes}
+        **Patient History:** {history}
+        **Uploaded Document Contents:** {doc_texts}
+        **Instructions:**
+        Based on all available data, provide a clinical analysis. If you need more information, use the [SEARCH: query] tool.
+        Structure your final response with the headings: ### Executive Summary, ### Detailed Reasoning, and ### Sources & Search Data.
+        """
+        st.session_state.raw_data = initial_prompt
+
     try:
-        response = client.chat.completions.create(
-            model="google/medgemma-27b-it",
-            messages=messages,
-            temperature=temperature,
-            max_tokens=4096
-        )
-        return response.choices[0].message.content
+        client = Groq(api_key=utils.get_secret("GROQ_API_KEY"))
+        messages = [{"role": "user", "content": initial_prompt}]
+
+        for _ in range(3): # Allow up to 3 turns for the agentic loop
+            with st.spinner("AI is analyzing..."):
+                response_stream = client.chat.completions.create(
+                    messages=messages,
+                    model="llama3-70b-8192",
+                    temperature=0.2,
+                    stream=True
+                )
+
+                full_response = ""
+                placeholder = st.empty()
+                for chunk in response_stream:
+                    full_response += chunk.choices[0].delta.content or ""
+                    placeholder.markdown(full_response + "...")
+
+            search_query = utils.extract_search_command(full_response)
+            if search_query:
+                messages.append({"role": "assistant", "content": full_response})
+                with st.spinner(f"Searching for: {search_query}..."):
+                    search_results = mcp_client.call_backend_tool("search_medical_web", {"query": search_query})
+                messages.append({"role": "user", "content": f"Search results for '{search_query}':\n{search_results}"})
+            else:
+                break # No search command found, so we're done.
+
+        # Parse and display the final response
+        parsed_response = utils.parse_dashboard_response(full_response)
+        st.session_state.summary = parsed_response["summary"]
+        st.session_state.reasoning = parsed_response["reasoning"]
+        st.session_state.summary_placeholder.markdown(st.session_state.summary)
+        st.session_state.reasoning_placeholder.markdown(st.session_state.reasoning)
+
+        # Save the log
+        mcp_client.call_backend_tool("save_consultation_log", {"patient_id": patient_id, "log_entry": full_response})
+        st.success("Consultation complete and log saved.")
+
     except Exception as e:
-        error_msg = str(e)
-        if "503" in error_msg or "timeout" in error_msg.lower() or "connection error" in error_msg.lower():
-            raise Exception("System is warming up (Cold Start). Please wait 30-60 seconds and try again.")
-        raise e
+        st.error(f"An error occurred during the AI analysis: {e}")
 
-# 4. Helper Function: Run Triage Logic
-def run_triage_engine(user_text, image_obj=None):
-    """Executes the full ReAct loop for a given text and optional image."""
+def main_dashboard():
+    """Renders the main dashboard UI and orchestrates the logic."""
 
-    # 1. Prepare Message Content (Multimodal)
-    message_content = user_text
+    # --- Session State Initialization ---
+    if "summary" not in st.session_state:
+        st.session_state.summary = "Waiting for analysis..."
+    if "reasoning" not in st.session_state:
+        st.session_state.reasoning = "Waiting for analysis..."
+    if "raw_data" not in st.session_state:
+        st.session_state.raw_data = "Input data will be displayed here."
 
-    if image_obj:
-        img_bytes = image_obj.read()
-        base64_img = base64.b64encode(img_bytes).decode('utf-8')
-        message_content = [
-            {"type": "text", "text": user_text},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-        ]
-        st.toast("Sending multimodal data...", icon="🚀")
+    # --- Sidebar ---
+    with st.sidebar:
+        st.title("MCP Dashboard")
+        st.write(f"Welcome, **Dr. {st.session_state.username}**")
+        st.markdown("---")
 
-    # Add User Message to History
-    st.session_state.messages.append({"role": "user", "content": message_content})
-    with st.chat_message("user"):
-        st.markdown(user_text)
-        if image_obj:
-            image_obj.seek(0)
-            st.image(image_obj)
+        mode = st.radio("Select Mode", ["👨‍⚕️ Doctor Mode", "🤒 Patient Mode"])
 
-    # Prepare Context for Model
-    context_messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}] + st.session_state.messages
+        if st.button("Logout"):
+            # Clear all session state on logout
+            for key in st.session_state.keys():
+                del st.session_state[key]
+            st.session_state.authenticated = False
+            st.rerun()
 
-    # Determine Engine
-    use_fast_engine = "Fast" in engine_choice
-    source_type = "fast" if use_fast_engine else "expert"
-    engine_name = "Groq Llama-3.3-70B" if use_fast_engine else "Modal MedGemma 27B"
+    # --- Main Content (40/60 Split) ---
+    st.title("Clinical Intelligence Dashboard")
 
-    with st.chat_message("assistant"):
-        placeholder = st.empty()
-        status_container = st.status(f"Initializing {engine_name}...", expanded=True)
-
-        try:
-            # --- ReAct LOOP ---
-            # Note: Fast engine might not follow strict ReAct loop with tools as robustly,
-            # but we'll try to keep the loop structure for search calls if supported.
-            max_turns = 5
-            final_response_text = ""
-
-            for turn in range(max_turns):
-                # Call Model
-                try:
-                    status_container.write(f"AI Brain: {engine_name} (Turn {turn+1})...")
-                    if use_fast_engine:
-                        response_text = tools.call_fast_triage(context_messages)
-                    else:
-                        response_text = call_model(context_messages)
-                except Exception as e:
-                    status_container.update(label="System Warning", state="error")
-                    st.error(str(e))
-                    # Stop execution if model call fails
-                    return
-
-                # Check for Search Command
-                search_query = utils.extract_search_command(response_text)
-
-                if search_query:
-                    status_container.markdown(f"**Tool Call:** `[SEARCH: {search_query}]`")
-                    tool_result = tools.search_pubmed(search_query)
-                    status_container.write("Tool result received.")
-                    context_messages.append({"role": "assistant", "content": response_text})
-                    context_messages.append({"role": "user", "content": f"TOOL_RESULT for '{search_query}':\n{tool_result}"})
-                else:
-                    final_response_text = response_text
-                    status_container.update(label="Diagnosis Complete", state="complete", expanded=False)
-                    break
-
-            # --- DISPLAY RESULTS ---
-            parsed = utils.parse_medgemma_response(final_response_text, source=source_type)
-
-            # Use UI helper to render
-            ui.render_clean_response(parsed)
-
-            # Store ONLY the clean content (stripped of thoughts) or the full raw?
-            # Usually we store what we showed or the raw response.
-            # Storing raw allows context to be preserved, but for display we want clean.
-            # Given the strict requirement "Show ONLY final assessment", we should probably
-            # ensure that when this is rendered from history, it is also clean.
-            # But render_clean_response handles that.
-            # We append the full raw response to history so the model has context for next turn.
-            # st.session_state.messages.append({"role": "assistant", "content": final_response_text})
-
-            # Correction based on review: strip think tags before storing to ensure history is clean.
-            cleaned_text_for_history = utils.strip_think_tags(final_response_text)
-            st.session_state.messages.append({"role": "assistant", "content": cleaned_text_for_history})
-
-        except Exception as e:
-            st.error(f"An unexpected error occurred: {e}")
-
-# --- FLOATING INPUT BAR ---
-# Logic: Place this code at the VERY END of your script (after displaying chat history)
-with st.container():
-    # This container simulates the sticky footer
-    st.markdown('<div class="fixed-bottom">', unsafe_allow_html=True)
-
-    col1, col2, col3 = st.columns([1, 4, 1])
+    col1, col2 = st.columns([2, 3])
 
     with col1:
-        # AUDIO INPUT (Compact)
-        audio_val = st.audio_input("Record", label_visibility="collapsed")
+        # --- Input Zone ---
+        st.header("Control Panel")
+        patient_id = st.text_input("Patient ID", placeholder="e.g., Patient-001")
 
-    with col2:
-        # TEXT INPUT (Populated by Audio or Manual Typing)
-        # Logic: If audio_val changes, update session_state.user_draft
-        if audio_val:
-            # Create a hash of the audio bytes to serve as a unique ID
-            # audio_val is a BytesIO object or bytes? st.audio_input returns UploadedFile which acts like file
-            # Wait, st.audio_input returns an UploadedFile object which extends BytesIO.
-            # We can read it.
-            # But the user snippet says: "Create a hash of the audio bytes"
-            # And "audio_val" in snippet seems to be treated as bytes in `md5(audio_val)`.
-            # But st.audio_input returns a file-like object.
-            # We need to read it first.
-
-            # Let's read it safely.
-            audio_bytes = audio_val.getvalue()
-
-            audio_hash = hashlib.md5(audio_bytes).hexdigest()
-
-            # Check if this is new audio
-            if st.session_state.get("last_audio_hash") != audio_hash:
-                with st.spinner("Processing audio..."):
-                    # Update state immediately to prevent re-runs
-                    st.session_state.last_audio_hash = audio_hash
-
-                    # Call transcription
-                    transcribed_text = tools.transcribe_audio(audio_bytes)
-
-                    # Update draft
-                    if st.session_state.user_draft:
-                        st.session_state.user_draft += f" {transcribed_text}"
-                    else:
-                        st.session_state.user_draft = transcribed_text
-
-                    st.rerun() # Force refresh to show text in the input box
-
-        # The Text Area acts as the main input
-        # Note: 'key' is crucial for state syncing. We use a separate key for the widget
-        # and sync it to user_draft manually if needed, or just rely on the key being same as session state variable?
-        # Streamlit allows key="user_draft" to bind directly to st.session_state.user_draft.
-        # This is the cleanest way.
-        user_input = st.text_area(
-            "Message MedGemma...",
-            value=st.session_state.user_draft,
-            height=68, # Minimal height
-            label_visibility="collapsed",
-            key="chat_box_input" # Using a distinct key to avoid conflicts if we manipulate state manually above
+        physician_notes = st.text_area(
+            "Physician Notes / Clinical Context",
+            height=200,
+            placeholder="Enter patient history, current observations, and specific questions..."
         )
 
-        # Sync back to state if user types manually
-        if user_input != st.session_state.user_draft:
-             st.session_state.user_draft = user_input
+        uploaded_files = st.file_uploader(
+            "Upload Clinical Documents (PDF, DOCX, Images)",
+            accept_multiple_files=True
+        )
 
-    with col3:
-        # SEND BUTTON
-        if st.button("🚀 Send", use_container_width=True, type="primary"):
-            if st.session_state.user_draft.strip():
-                # Trigger the standard "Send Message" logic here
-                run_triage_engine(st.session_state.user_draft, uploaded_image)
-                # Clear input
-                st.session_state.user_draft = ""
-                st.rerun()
+        if st.button("Run Consult", use_container_width=True, type="primary"):
+            if not patient_id and not physician_notes and not uploaded_files:
+                st.warning("Please provide a Patient ID, notes, or at least one document.")
+            else:
+                run_consultation(patient_id, physician_notes, uploaded_files)
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    with col2:
+        # --- Intelligence Zone ---
+        st.header("Analysis & Results")
 
+        tab1, tab2, tab3 = st.tabs(["📊 Executive Summary", "🧠 Reasoning Trace", "🗃️ Raw Data"])
+
+        with tab1:
+            st.markdown("### High-Level Assessment")
+            st.session_state.summary_placeholder = st.empty()
+            st.session_state.summary_placeholder.markdown(st.session_state.summary)
+
+        with tab2:
+            st.markdown("### Step-by-Step Logic")
+            st.session_state.reasoning_placeholder = st.empty()
+            st.session_state.reasoning_placeholder.markdown(st.session_state.reasoning)
+
+        with tab3:
+            st.markdown("### Supporting Data & Citations")
+            st.text_area("Compiled Input Data", st.session_state.raw_data, height=400, disabled=True)
+
+if __name__ == "__main__":
+    main_dashboard()
