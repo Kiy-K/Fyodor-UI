@@ -1,3 +1,8 @@
-__pycache__/
-*.pyc
+# Streamlit
+.streamlit/
+
+# Environment variables
 .env
+
+# Python cache
+__pycache__/

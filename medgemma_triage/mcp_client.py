@@ -26,12 +26,6 @@ def call_backend_tool(tool_name, arguments={}):
     """
     Synchronous wrapper for calling a backend tool.
     """
-    if tool_name == "get_patient_history":
-        return "Mock patient history."
-    elif tool_name == "search_medical_web":
-        return "Mock search results."
-    elif tool_name == "save_consultation_log":
-        return "Log saved."
     return asyncio.run(call_backend_tool_async(tool_name, arguments))
 
 async def list_backend_tools_async():
