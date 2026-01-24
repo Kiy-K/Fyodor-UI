@@ -6,7 +6,6 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import streamlit as st
-from medgemma_triage import auth
 from medgemma_triage import ui
 
 # --- Page Configuration ---
@@ -20,33 +19,7 @@ st.set_page_config(
 # --- Styling ---
 ui.setup_styles()
 
-# --- Authentication Gatekeeper ---
-auth.seed_admin_user() # Ensure the admin user exists for the demo
-
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if not st.session_state.authenticated:
-    # --- Login Form ---
-    st.title("👨‍⚕️ MCP Doctor Dashboard Login")
-
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login")
-
-        if submitted:
-            if auth.verify_user(username, password):
-                st.session_state.authenticated = True
-                st.session_state.username = username
-                st.rerun()
-            else:
-                st.error("Invalid username or password.")
-
-    st.stop() # --- IMPORTANT: Stop execution if not authenticated ---
-
 # --- Main Dashboard Application ---
-# This code runs ONLY if st.session_state.authenticated is True
 
 from medgemma_triage import mcp_client
 from medgemma_triage import utils
@@ -126,17 +99,10 @@ def main_dashboard():
     # --- Sidebar ---
     with st.sidebar:
         st.title("MCP Dashboard")
-        st.write(f"Welcome, **Dr. {st.session_state.username}**")
+        st.radio("Who are you?", ["I am a doctor", "I am a patient"])
         st.markdown("---")
 
         mode = st.radio("Select Mode", ["👨‍⚕️ Doctor Mode", "🤒 Patient Mode"])
-
-        if st.button("Logout"):
-            # Clear all session state on logout
-            for key in st.session_state.keys():
-                del st.session_state[key]
-            st.session_state.authenticated = False
-            st.rerun()
 
     # --- Main Content (40/60 Split) ---
     st.title("Clinical Intelligence Dashboard")
