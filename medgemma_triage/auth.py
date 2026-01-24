@@ -17,11 +17,11 @@ class MockRedis:
         print(f"MOCK: Getting all from '{key}'")
         return self._data.get(key, {})
 
-    def hset(self, key, value):
-        print(f"MOCK: Setting data for '{key}'")
+    def hset(self, key, field, value):
+        print(f"MOCK: Setting '{field}' for '{key}'")
         if key not in self._data:
             self._data[key] = {}
-        self._data[key].update(value)
+        self._data[key][field] = value
 
 # --- Redis Client Initialization ---
 def get_redis_client():
@@ -29,21 +29,25 @@ def get_redis_client():
     Initializes and returns a connection to Upstash Redis if secrets are available,
     otherwise returns a mock client for local testing.
     """
-    if hasattr(st, 'secrets') and "UPSTASH_REDIS_REST_URL" in st.secrets:
-        try:
-            redis = Redis(
+    try:
+        # This will raise an exception if secrets are not configured
+        if st.secrets.get("UPSTASH_REDIS_REST_URL"):
+            return Redis(
                 url=st.secrets["UPSTASH_REDIS_REST_URL"],
                 token=st.secrets["UPSTASH_REDIS_REST_TOKEN"],
             )
-            return redis
-        except Exception as e:
-            st.error(f"Failed to connect to real Redis: {e}")
-            return None
-    else:
-        # Use mock client if secrets aren't found
-        if "mock_redis" not in st.session_state:
-            st.session_state.mock_redis = MockRedis()
-        return st.session_state.mock_redis
+    except st.errors.StreamlitAPIException as e:
+        # This catches the specific error when secrets aren't found
+        pass # Fall through to use mock client
+    except Exception as e:
+        # Catch other potential connection errors
+        st.error(f"An unexpected error occurred: {e}")
+        pass # Fall through to use mock client
+
+    # Use mock client if secrets aren't found or are invalid
+    if "mock_redis" not in st.session_state:
+        st.session_state.mock_redis = MockRedis()
+    return st.session_state.mock_redis
 
 def verify_user(username, password):
     """Verifies user credentials against the database (real or mock)."""
@@ -76,14 +80,12 @@ def seed_admin_user():
     admin_key = "user:admin"
     if not redis.exists(admin_key):
         print("Admin user not found, creating one.")
-        password = "admin" # Set a simpler password for local testing
+        password = "admin123"
         password_hash = hashlib.sha256(password.encode()).hexdigest()
 
-        redis.hset(admin_key, {
-            "username": "admin",
-            "password_hash": password_hash,
-            "role": "doctor"
-        })
+        redis.hset(admin_key, "username", "admin")
+        redis.hset(admin_key, "password_hash", password_hash)
+        redis.hset(admin_key, "role", "doctor")
         print("Default admin user created/seeded.")
 
 if __name__ == '__main__':

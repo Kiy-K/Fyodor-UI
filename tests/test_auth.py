@@ -16,11 +16,14 @@ class TestAuth(unittest.TestCase):
         username = "testuser"
         password = "password123"
         password_hash = hashlib.sha256(password.encode()).hexdigest()
-        mock_redis.hget.return_value = password_hash
+
+        # Simulate hgetall returning a dictionary
+        mock_redis.exists.return_value = True
+        mock_redis.hgetall.return_value = {"password_hash": password_hash}
 
         # Call the function and assert the result
         self.assertTrue(auth.verify_user(username, password))
-        mock_redis.hget.assert_called_with(f"user:{username}", "password_hash")
+        mock_redis.hgetall.assert_called_with(f"user:{username}")
 
     @patch('medgemma_triage.auth.get_redis_client')
     def test_verify_user_failure_wrong_password(self, mock_get_redis_client):
@@ -32,7 +35,9 @@ class TestAuth(unittest.TestCase):
         stored_password = "password123"
         wrong_password = "wrongpassword"
         password_hash = hashlib.sha256(stored_password.encode()).hexdigest()
-        mock_redis.hget.return_value = password_hash
+
+        mock_redis.exists.return_value = True
+        mock_redis.hgetall.return_value = {"password_hash": password_hash}
 
         self.assertFalse(auth.verify_user(username, wrong_password))
 
@@ -41,7 +46,8 @@ class TestAuth(unittest.TestCase):
         """Test failed user verification due to non-existent user."""
         mock_redis = MagicMock()
         mock_get_redis_client.return_value = mock_redis
-        mock_redis.hget.return_value = None
+        mock_redis.exists.return_value = False
+        mock_redis.hgetall.return_value = {}
 
         self.assertFalse(auth.verify_user("nonexistentuser", "password"))
 

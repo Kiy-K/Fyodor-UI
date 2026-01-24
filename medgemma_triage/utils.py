@@ -99,3 +99,13 @@ def process_uploaded_files(uploaded_files):
             image_files.append(file)
 
     return "\n\n".join(extracted_texts), image_files
+
+def extract_search_command(text):
+    """
+    Extracts the search query from the model's response.
+    Looks for the pattern [SEARCH: query].
+    """
+    match = re.search(r"\[SEARCH:\s*(.*?)\]", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None

@@ -7,23 +7,23 @@ def run(playwright):
     browser = playwright.chromium.launch(headless=True)
     context = browser.new_context()
     page = context.new_page()
-    page.goto("http://localhost:8503")
+    page.goto("http://localhost:8501")
 
     try:
         # Wait for the app to be ready
         page.wait_for_load_state('networkidle')
 
         # Enter credentials
-        page.get_by_label("Username").click()
         page.get_by_label("Username").fill("admin")
-        page.get_by_label("Password").click()
-        page.get_by_label("Password").fill("admin")
+        page.get_by_role("textbox", name="Password").fill("admin123")
 
         # Click login
-        page.get_by_role("button", name=re.compile("log in", re.IGNORECASE)).click()
+        login_button = page.get_by_role("button", name=re.compile(r"login", re.IGNORECASE))
+        login_button.wait_for(state="visible")
+        login_button.click()
 
         # Wait for the main app to load after login
-        expect(page.get_by_text("Upload Patient Documents")).to_be_visible(timeout=20000)
+        expect(page.get_by_text("Upload Clinical Documents (PDF, DOCX, Images)")).to_be_visible(timeout=20000)
 
         # Take screenshot
         page.screenshot(path="login_success.png")
