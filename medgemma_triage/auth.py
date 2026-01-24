@@ -24,6 +24,7 @@ class MockRedis:
         self._data[key][field] = value
 
 # --- Redis Client Initialization ---
+@st.cache_resource
 def get_redis_client():
     """
     Initializes and returns a connection to Upstash Redis if secrets are available,
